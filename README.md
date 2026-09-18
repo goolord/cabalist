@@ -110,3 +110,23 @@ cabal run cabalist -- --screenshot out.bmp DIRECTORY
 The self-test builds a two-package monorepo in the temporary directory, then
 tags and builds one package through the window, opens each dialog, and
 uploads candidates of both in dependency order, all in dry-run mode.
+
+### Release builds
+
+```sh
+runghc --ghc-arg=-package-env=- tools/Release.hs            # dist/cabalist-VERSION-OS-ARCH/
+runghc --ghc-arg=-package-env=- tools/Release.hs --archive  # the same, as a .zip (Windows) or .tar.gz
+```
+
+`tools/Release.hs` needs only the libraries that come with GHC.
+`-package-env=-` keeps a GHC environment file (left by `cabal install --lib`)
+from hiding them. A release build uses `cabal.project.release`: `-O2`, split
+sections so the linker drops unused code, and every Haskell library linked
+in. The executable is then stripped and packed with `upx --best` (`--no-upx`
+skips that; macOS never uses it).
+
+On Windows, SDL3, SDL3_ttf and their dependencies are linked in from MSYS2's
+static libraries (found with `pkg-config`), so the release is one `.exe`. The
+build fails if the executable would still load a DLL from MSYS2. On Linux and
+macOS the binary uses the system's SDL3 and SDL3_ttf, so people running it
+need them installed (from their package manager, or Homebrew on macOS).

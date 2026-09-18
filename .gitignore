@@ -4,3 +4,4 @@ dist/
 *.prof
 *.hp
 cabal.project.local*
+dist-newstyle-release/

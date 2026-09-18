@@ -1,0 +1,15 @@
+-- Settings for release builds; `make release` uses this file. Everything in
+-- cabal.project applies, and cabal.project.local does not.
+import: cabal.project
+
+tests: False
+benchmarks: False
+optimization: 2
+
+-- Link every Haskell library into the executable, and let the linker drop
+-- the code that is never called.
+executable-dynamic: False
+
+package *
+  split-sections: True
+  documentation: False
