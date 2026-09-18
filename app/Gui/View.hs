@@ -41,7 +41,7 @@ import Gui.State
 import Gui.Style
 import NanoUI
 import NanoUI.Backend.Sdl (FileDialogId, FileDialogResult (..), askOpenFolderDialog, defaultFileDialogOptions, pollFileDialogUi, setSdlUiScale)
-import NanoUI.Context (Context (..), getPrevRect)
+import NanoUI.Context (Context (..))
 import NanoUI.Monad (askContext, askInput)
 import NanoUI.Testing (UiCursorKind (..), textFieldActive)
 import System.FilePath (takeFileName, (</>))
@@ -774,11 +774,12 @@ logView Frame {vars = Vars {..}, ..} =
     -- scrollbar would come and go with the lines on screen.
     widestW <- uiIO (fst <$> ctxResolveMeasure ctx sizeSmall WeightNormal FontStyleNormal FontMono widest)
     scrollWid <- withKey ("log" :: Text) nextId
-    mRect <- uiIO (getPrevRect ctx scrollWid)
+    metrics <- uiIO (getScrollMetrics ctx scrollWid)
     offset <- uiIO (getScrollOffset2D ctx scrollWid)
-    let viewH = maybe 200 rectH mRect
-        -- Room for the padding and the horizontal scrollbar under the last line.
-        totalH = fromIntegral n * logRowH + 36
+    let -- The viewport is clear of the horizontal scrollbar when there is one,
+        -- so only the column's own padding goes under the last line.
+        viewH = maybe 200 (rectH . scrollViewport) metrics
+        totalH = fromIntegral n * logRowH + 12
         maxOff = max 0 (totalH - viewH)
         curY = v2Y offset
         userScrolled = abs (curY - val logPrevY) > 0.5
@@ -1020,10 +1021,13 @@ ellipsize n t
   | otherwise = t
 
 -- | Open a web page in the default browser.
+--
+-- On Windows, process quotes every argument, and rundll32 cannot read a
+-- quoted @url.dll,FileProtocolHandler@, so the page is handed to Explorer.
 openUrl :: Text -> IO ()
 openUrl url = void (try (void (spawnProcess opener (args <> [T.unpack url]))) :: IO (Either SomeException ()))
   where
     (opener, args) = case os of
-      "mingw32" -> ("rundll32", ["url.dll,FileProtocolHandler"])
+      "mingw32" -> ("explorer", [])
       "darwin" -> ("open", [])
       _ -> ("xdg-open", [])
