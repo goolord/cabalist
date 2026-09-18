@@ -232,6 +232,9 @@ selfTestSteps opts dir = do
     click "Show log"
     expect "✓ Done"
     shot "03-log"
+    doneAt <- requireSpan "no ✓ Done" . findExact "✓ Done" =<< hSpans h
+    replicateM_ 5 (frame base {inputMousePos = doneAt, inputScroll = V2 0 (-3)} >> settle)
+    shot "03b-log-scrolled"
     click "Hide log"
 
     step "more menu, then the bump dialog"

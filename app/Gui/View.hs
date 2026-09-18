@@ -119,6 +119,9 @@ data Vars = Vars
   -- ^ An index into 'uiScales'.
   , logSticky :: !(Var Bool)
   , logPrevY :: !(Var Float)
+  , logWidest :: !(Var (Int, Int, Text))
+  -- ^ The job, how many of its lines have been looked at, and the longest of
+  -- them, tabs expanded. Logs only grow, so each line is looked at once.
   }
 
 useVars :: NanoUI Vars
@@ -149,6 +152,7 @@ useVars = do
   scaleDraft <- var (useInt 0)
   logSticky <- var (useFlag True)
   logPrevY <- var (useFloat 0)
+  logWidest <- var (useState (-1, 0, ""))
   pure Vars {..}
 
 data Frame = Frame
@@ -747,6 +751,16 @@ logView Frame {vars = Vars {..}, ..} =
     separator
     let logLines = maybe Seq.empty jobLog job
         n = Seq.length logLines
+        jid = maybe (-1) jobId job
+        (seenJob, seen, widest0) = val logWidest
+        widest
+          | seenJob == jid && seen <= n = foldl' longer widest0 (Seq.drop seen logLines)
+          | otherwise = foldl' longer "" logLines
+    when ((seenJob, seen, widest0) /= (jid, n, widest)) (put logWidest (jid, n, widest))
+    -- Only the lines in view are laid out, so the content takes its width
+    -- from the longest line of the whole log: otherwise the horizontal
+    -- scrollbar would come and go with the lines on screen.
+    widestW <- uiIO (fst <$> ctxResolveMeasure ctx sizeSmall WeightNormal FontStyleNormal FontMono widest)
     scrollWid <- withKey ("log" :: Text) nextId
     mRect <- uiIO (getPrevRect ctx scrollWid)
     offset <- uiIO (getScrollOffset2D ctx scrollWid)
@@ -765,14 +779,16 @@ logView Frame {vars = Vars {..}, ..} =
     let firstVis = max 0 (floor (targetY / logRowH) - 2)
         lastVis = min (n - 1) (ceiling ((targetY + viewH) / logRowH) + 2)
     void $ withKey ("log" :: Text) $ scrollArea2D (fillW . fillH) $
-      columnWith (padXY 16 6 . gap 0 . tight . minW 900) $ do
+      columnWith (padXY 16 6 . gap 0 . tight . minW (max 900 (widestW + 32))) $ do
         when (firstVis > 0) $ spacer Fit (Fixed (fromIntegral firstVis * logRowH))
         forM_ [firstVis .. lastVis] $ \i -> forM_ (Seq.lookup i logLines) $ \l ->
           withKey i $ rowWith (tight . fixedH logRowH . alignMid) $
-            labelWith (tight . alignMid . fontMono . fontSize sizeSmall . fontColor (lineColour l)) (if T.null l then " " else T.replace "\t" "    " l)
+            labelWith (tight . alignMid . fontMono . fontSize sizeSmall . fontColor (lineColour l)) (if T.null l then " " else expandTabs l)
         when (lastVis < n - 1) $ spacer Fit (Fixed (fromIntegral (n - 1 - lastVis) * logRowH))
   where
     logRowH = 20
+    expandTabs = T.replace "\t" "    "
+    longer w l = let l' = expandTabs l in if T.length l' > T.length w then l' else w
 
 -- | Commands stand out from their output; failures and warnings are coloured.
 lineColour :: Text -> Color
