@@ -4,10 +4,11 @@
 -- | The main window.
 --
 -- A release is shown as a track of four stops (version, tag, candidate,
--- published) with one button for the next step. Everything else a release
--- can need (checks, rebuilds, documentation, redoing a tag) waits in a menu,
--- and build settings live in the settings dialog. Work runs in the
--- background; a one-line activity bar reports it, and opens onto the log.
+-- published) with one button for the next step, and beside it buttons to
+-- redo the tag or update the candidate once there is a tag. Everything else
+-- a release can need (checks, rebuilds, documentation) waits in a menu, and
+-- build settings live in the settings dialog. Work runs in the background; a
+-- one-line activity bar reports it, and opens onto the log.
 module Gui.View
   ( ViewCache
   , newViewCache
@@ -560,11 +561,21 @@ actions frame@Frame {vars = Vars {..}, ..} p s next =
         labelWith (tight . alignMid . ink palMuted) (actionLabel (jobAction j) <> (if jobStatus j == JobQueued then ", waiting" else ""))
       Nothing -> do
         forM_ (primaryStep next) $ \(txt, go) -> whenM (styled primary (actionButton txt)) go
-        styled quiet $ forM_ (secondarySteps next) $ \(txt, go) -> whenM (actionButton txt) go
+        styled quiet $ forM_ (secondarySteps next <> redoSteps) $ \(txt, go) -> whenM (actionButton txt) go
     moreMenu frame p s next
   where
     busy = find (\j -> pkgName (jobPackage j) == pkgName p && not (jobFinished (jobStatus j))) jobs
     queue action = uiIO (enqueue env False [(p, action)])
+    -- Once there is a tag, it can be moved to HEAD and everything after it
+    -- made again, until the version is published.
+    redoSteps =
+      [ step
+      | not (isPublished p s)
+      , not (psVersionUncommitted s)
+      , isJust (psTagCommit s)
+      , step <- [("Redo tag and build", redoTag), ("Update candidate", updateCandidate)]
+      ]
+    redoTag = uiIO (enqueue env True [(p, ActTagDist)])
     askBump = put bumpFor (Just (pkgName p))
     askPublish = put pending (Just (Pending ("Publish " <> pkgId p) [(p, ActPublish)]))
     primaryStep = \case
@@ -577,9 +588,6 @@ actions frame@Frame {vars = Vars {..}, ..} p s next =
       StageReleased -> Nothing
     secondarySteps = \case
       StageCandidate -> [("Publish now…", askPublish)]
-      StageUploaded ->
-        [ ("Update candidate", updateCandidate)
-        ]
       _ -> []
     -- Move the tag to HEAD, make the tarball again over the old one, and
     -- upload it as the candidate, as hkgr's upload --force does.
@@ -597,8 +605,6 @@ moreMenu Frame {vars = Vars {..}, ..} p s next = do
         sequence
           [ item True "Check package" (queue ActCheck)
           , item (next /= StageNeedsBump) "Bump version…" (put bumpFor (Just (pkgName p)))
-          , item (not published && not (psVersionUncommitted s)) "Redo tag and build" (uiIO (enqueue env True [(p, ActTagDist)]))
-          , item (not published && not (psVersionUncommitted s)) "Update candidate" (uiIO (enqueue env True [(p, ActUpload)]))
           , item (psTarball s) "Rebuild from tarball" (queue ActBuild)
           , item (psTarball s && pkgHasLibrary p) "Upload candidate docs" (queue ActUploadDocs)
           , item (psTarball s && pkgHasLibrary p) "Publish docs…" (put pending (Just (Pending ("Publish documentation for " <> pkgId p) [(p, ActPublishDocs)])))
@@ -613,7 +619,6 @@ moreMenu Frame {vars = Vars {..}, ..} p s next = do
   forM_ (join chosen) $ \go -> put moreOpen False >> go
   when (respClicked popupResp) (put moreOpen False)
   where
-    published = isPublished p s
     queue action = uiIO (enqueue env False [(p, action)])
     item enabled txt go
       | enabled = (\c -> if c then Just go else Nothing) <$> menuItem txt

@@ -238,8 +238,9 @@ selfTestSteps opts dir = do
     click "Hide log"
 
     step "more menu, then the bump dialog"
-    click "More"
     expect "Redo tag and build"
+    expect "Update candidate"
+    click "More"
     shot "04-more"
     click "Bump version…"
     expect "Bump cabalist-demo-app"
