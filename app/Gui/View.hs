@@ -38,7 +38,7 @@ import GHC.Clock (getMonotonicTime)
 import Gui.State
 import Gui.Style
 import NanoUI
-import NanoUI.Backend.Sdl (FileDialogId, FileDialogResult (..), askOpenFolderDialog, defaultFileDialogOptions, pollFileDialogUi)
+import NanoUI.Backend.Sdl (FileDialogId, FileDialogResult (..), askOpenFolderDialog, defaultFileDialogOptions, pollFileDialogUi, setSdlUiScale)
 import NanoUI.Context (Context (..), getPrevRect)
 import NanoUI.Monad (askContext, askInput)
 import NanoUI.Testing (UiCursorKind (..), textFieldActive)
@@ -111,6 +111,12 @@ data Vars = Vars
   , settingsOpen :: !(Var Bool)
   , formatDraft :: !(Var Text)
   , remoteDraft :: !(Var Text)
+  , hlintDraft :: !(Var Bool)
+  , buildDraft :: !(Var Bool)
+  , siblingsDraft :: !(Var Bool)
+  , dryRunDraft :: !(Var Bool)
+  , scaleDraft :: !(Var Int)
+  -- ^ An index into 'uiScales'.
   , logSticky :: !(Var Bool)
   , logPrevY :: !(Var Float)
   }
@@ -136,6 +142,11 @@ useVars = do
   settingsOpen <- var (useFlag False)
   formatDraft <- var (useText "")
   remoteDraft <- var (useText "")
+  hlintDraft <- var (useFlag False)
+  buildDraft <- var (useFlag False)
+  siblingsDraft <- var (useFlag False)
+  dryRunDraft <- var (useFlag False)
+  scaleDraft <- var (useInt 0)
   logSticky <- var (useFlag True)
   logPrevY <- var (useFloat 0)
   pure Vars {..}
@@ -195,6 +206,7 @@ appView env cache = do
   vars <- useVars
   frame <- uiIO (prepareFrame env cache ctx inp st vars)
   openLogOnFailure frame
+  setSdlUiScale (stUiScale st)
 
   columnWith (fillW . fillH . gap 0 . tight) $ do
     header frame
@@ -268,6 +280,11 @@ header frame@Frame {vars = Vars {..}, ..} =
         forM_ repo $ \r -> do
           put formatDraft (cfgTagFormat (repoConfig r))
           put remoteDraft (cfgRemote (repoConfig r))
+        put hlintDraft (optHlint (stOptions st))
+        put buildDraft (optBuild (stOptions st))
+        put siblingsDraft (optSiblings (stOptions st))
+        put dryRunDraft (stDryRun st)
+        put scaleDraft (fromMaybe 0 (findIndex ((== stUiScale st) . fst) uiScales))
         put settingsOpen True
 
 loginLabel :: AppState -> Text
@@ -878,9 +895,8 @@ loginDialog Frame {vars = Vars {..}, ..} = do
 settingsDialog :: Frame -> NanoUI ()
 settingsDialog Frame {vars = Vars {..}, ..} = do
   chosen <- dialogFor (if val settingsOpen then Just () else Nothing) (const "Settings") (put settingsOpen False) $ \() ->
-    columnWith (gap 12 . minW 540 . dialogBody) $ do
-      forM_ repo $ \r -> do
-        labelWith (tight . fontSemiBold . ink palText) "Tags"
+    columnWith (gap 18 . minW 540 . dialogBody) $ do
+      forM_ repo $ \r -> section "Tags" $ do
         rowWith (fillW . gap 8 . alignMid . tight) $ do
           bind formatDraft (textInputConfigured defaultTextInputConfig {ticLayout = (fixedH 34 . fillW) (ticLayout defaultTextInputConfig)})
           let presetIx = fromMaybe 0 (findIndex (== val formatDraft) tagFormats)
@@ -895,28 +911,37 @@ settingsDialog Frame {vars = Vars {..}, ..} = do
         rowWith (fillW . gap 8 . alignMid . tight) $ do
           labelWith (tight . alignMid . ink palMuted) "Push them to"
           bind remoteDraft (textInputConfigured defaultTextInputConfig {ticLayout = (fixedW 200 . fixedH 34) (ticLayout defaultTextInputConfig)})
-        spacer Fit (Fixed 4)
-      labelWith (tight . fontSemiBold . ink palText) "Building"
-      let opts = stOptions st
-          setOpts f = uiIO (modifyState env (\x -> x {stOptions = f (stOptions x)}))
-      hl <- checkbox "Run hlint on the release" (optHlint opts)
-      when (hl /= optHlint opts) $ setOpts (\o -> o {optHlint = hl})
-      bd <- checkbox "Build the tarball after making it" (optBuild opts)
-      when (bd /= optBuild opts) $ setOpts (\o -> o {optBuild = bd})
-      sb <- checkbox "Build against this repository's own dependencies" (optSiblings opts)
-      when (sb /= optSiblings opts) $ setOpts (\o -> o {optSiblings = sb})
-      dry <- checkbox "Dry run: log uploads and pushes instead of doing them" (stDryRun st)
-      when (dry /= stDryRun st) $ uiIO (modifyState env (\x -> x {stDryRun = dry}))
-      note ("cabal " <> maybe "not found" (showVersion . snd) (stCabal st) <> ". Tag settings are saved in .cabalist/config.")
-      separator
-      buttonsRow "Save" primary (isJust repo && (not valid || T.null (T.strip (val remoteDraft))))
+      section "Building" $ do
+        bind hlintDraft (checkbox "Run hlint on the release")
+        bind buildDraft (checkbox "Build the tarball after making it")
+        bind siblingsDraft (checkbox "Build against this repository's own dependencies")
+        bind dryRunDraft (checkbox "Dry run: log uploads and pushes instead of doing them")
+      section "Display" $
+        rowWith (fillW . gap 8 . alignMid . tight) $ do
+          labelWith (tight . alignMid . ink palMuted) "Scale the window's contents"
+          bind scaleDraft (selectWith (fixedW 200) (map snd uiScales))
+      columnWith (fillW . gap 12 . tight) $ do
+        note ("cabal " <> maybe "not found" (showVersion . snd) (stCabal st) <> ". Tag settings are saved in .cabalist/config; the rest apply to every repository.")
+        separator
+        buttonsRow "Save" primary (isJust repo && (not valid || T.null (T.strip (val remoteDraft))))
   forM_ chosen $ \((), c) -> do
-    case (c, repo) of
-      (ChoiceOk, Just r) -> uiIO (saveSettings env (repoConfig r) {cfgTagFormat = T.strip (val formatDraft), cfgRemote = T.strip (val remoteDraft)})
+    case c of
+      ChoiceOk -> uiIO $ do
+        forM_ repo $ \r -> saveSettings env (repoConfig r) {cfgTagFormat = T.strip (val formatDraft), cfgRemote = T.strip (val remoteDraft)}
+        saveUserSettings
+          env
+          UserSettings
+            { usOptions = (stOptions st) {optHlint = val hlintDraft, optBuild = val buildDraft, optSiblings = val siblingsDraft}
+            , usDryRun = val dryRunDraft
+            , usUiScale = maybe 1 fst (listToMaybe (drop (val scaleDraft) uiScales))
+            }
       _ -> pure ()
     put settingsOpen False
   where
     valid = validTagFormat (T.strip (val formatDraft))
+    section title body = columnWith (fillW . gap 10 . tight) $ do
+      labelWith (tight . fontSemiBold . ink palText) title
+      body
 
 --------------------------------------------------------------------------------
 -- Keyboard

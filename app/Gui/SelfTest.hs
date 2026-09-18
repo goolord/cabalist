@@ -120,7 +120,7 @@ headless opts env cache k = do
 -- | Render the window for a repository and save it.
 screenshot :: SdlOptions -> FilePath -> FilePath -> IO ()
 screenshot opts repoDir out = do
-  env <- newEnv True
+  env <- newEnv Nothing True
   cache <- newViewCache repoDir
   headless opts env cache $ \h -> do
     replicateM_ 3 (hFrame h (hBase h))
@@ -145,7 +145,7 @@ selfTestSteps opts dir = do
   tmp <- getTemporaryDirectory
   let root = tmp </> "cabalist-selftest-repo"
   makeDemoRepo root
-  env <- newEnv True
+  env <- newEnv Nothing True
   cache <- newViewCache root
   headless opts env cache $ \h -> do
     let base = hBase h

@@ -1,4 +1,5 @@
 {-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE ViewPatterns #-}
 
 -- | Application state shared between the UI thread and worker threads.
 --
@@ -29,6 +30,10 @@ module Gui.State
   , cancelAll
   , clearFinished
   , saveSettings
+  , UserSettings (..)
+  , userSettingsFile
+  , saveUserSettings
+  , uiScales
   , setCredentials
   , repoStage
   , repoStatusOf
@@ -64,6 +69,7 @@ import Cabalist.Version (Bump, bumpLabel)
 import System.Directory
 import System.FilePath (takeDirectory, (</>))
 import System.Process (ProcessHandle, terminateProcess)
+import Text.Read (readMaybe)
 
 -- | A release step, as the view offers it.
 data Action
@@ -153,6 +159,8 @@ data AppState = AppState
   , stDryRun :: !Bool
   , stOptions :: !Options
   -- ^ How steps build: hlint, the pristine build, sibling packages.
+  , stUiScale :: !Float
+  -- ^ The zoom of the whole window; zero follows the display's scaling.
   }
 
 data Env = Env
@@ -162,13 +170,22 @@ data Env = Env
   , envQueue :: !(Chan Int)
   , envCancelled :: !(IORef (Set Int))
   , envRunning :: !(IORef (Maybe (Int, ProcessHandle)))
+  , envSettingsFile :: !(Maybe FilePath)
+  -- ^ Where the build settings and dry run are kept; none for self-tests.
+  , envDryRunFlag :: !Bool
+  -- ^ Whether @--dry-run@ was given, which forces a dry run without saving it.
   }
 
 tshow :: Show a => a -> Text
 tshow = T.pack . show
 
-newEnv :: Bool -> IO Env
-newEnv dryRun = do
+-- | A new environment, with the user's settings read from a settings file if
+-- one is given; without one the UI keeps a scale of 1. A dry run is forced on
+-- by the flag, else as saved.
+newEnv :: Maybe FilePath -> Bool -> IO Env
+newEnv file dryRunFlag = do
+  saved <- maybe (pure defaultUserSettings {usUiScale = 1}) loadUserSettings file
+  let dryRun = dryRunFlag || usDryRun saved
   env <-
     Env
       <$> newIORef
@@ -185,12 +202,15 @@ newEnv dryRun = do
           , stCabalLogin = Nothing
           , stCredentials = FromCabalConfig
           , stDryRun = dryRun
-          , stOptions = defaultOptions
+          , stOptions = usOptions saved
+          , stUiScale = usUiScale saved
           }
       <*> newIORef (pure ())
       <*> newChan
       <*> newIORef Set.empty
       <*> newIORef Nothing
+      <*> pure file
+      <*> pure dryRunFlag
   void . forkIO $ detectCabal env
   void . forkIO . forever $ readChan (envQueue env) >>= runJob env
   pure env
@@ -354,6 +374,78 @@ saveSettings env cfg = do
     saveConfig (repoRoot repo) cfg
     modifyState env (\s -> s {stRepo = fmap (\r -> r {repoConfig = cfg}) (stRepo s)})
     void (forkIO (refreshRepo env))
+
+--------------------------------------------------------------------------------
+-- Build settings
+
+-- | The settings kept for the user across repositories.
+data UserSettings = UserSettings
+  { usOptions :: !Options
+  , usDryRun :: !Bool
+  , usUiScale :: !Float
+  -- ^ Zero follows the display's scaling.
+  }
+
+defaultUserSettings :: UserSettings
+defaultUserSettings = UserSettings defaultOptions False 0
+
+-- | The UI scales the settings offer, with their labels.
+uiScales :: [(Float, Text)]
+uiScales = (0, "Follow the display") : [(s, tshow (round (s * 100) :: Int) <> "%") | s <- [0.75, 1, 1.25, 1.5, 1.75, 2]]
+
+userSettingsFile :: IO FilePath
+userSettingsFile = (</> "settings") <$> getXdgDirectory XdgConfig "cabalist"
+
+-- | The saved user settings, or the defaults.
+loadUserSettings :: FilePath -> IO UserSettings
+loadUserSettings file = do
+  r <- try (readUtf8 file)
+  pure $ case r of
+    Left (_ :: SomeException) -> defaultUserSettings
+    Right src -> foldl apply defaultUserSettings (T.lines src)
+  where
+    apply us l = case T.breakOn ":" l of
+      (k, v) -> case (T.strip k, T.strip (T.drop 1 v)) of
+        ("hlint", flag -> Just b) -> us {usOptions = (usOptions us) {optHlint = b}}
+        ("build", flag -> Just b) -> us {usOptions = (usOptions us) {optBuild = b}}
+        ("siblings", flag -> Just b) -> us {usOptions = (usOptions us) {optSiblings = b}}
+        ("dry-run", flag -> Just b) -> us {usDryRun = b}
+        ("ui-scale", readMaybe . T.unpack -> Just s) | s >= 0 && s <= 4 -> us {usUiScale = s}
+        _ -> us
+    flag = \case
+      "true" -> Just True
+      "false" -> Just False
+      _ -> Nothing
+
+-- | Use these user settings, and save them. A dry run forced by
+-- @--dry-run@ is not saved: the file keeps what it said.
+saveUserSettings :: Env -> UserSettings -> IO ()
+saveUserSettings env us = do
+  let opts = usOptions us
+      dry = usDryRun us
+  modifyState env $ \s ->
+    s
+      { stOptions = (stOptions s) {optHlint = optHlint opts, optBuild = optBuild opts, optSiblings = optSiblings opts}
+      , stDryRun = dry
+      , stUiScale = usUiScale us
+      }
+  forM_ (envSettingsFile env) $ \file -> do
+    savedDry <-
+      if envDryRunFlag env && dry
+        then usDryRun <$> loadUserSettings file
+        else pure dry
+    void . (try :: IO () -> IO (Either SomeException ())) $ do
+      createDirectoryIfMissing True (takeDirectory file)
+      writeUtf8 file . T.unlines $
+        [ "-- cabalist settings"
+        , "hlint: " <> bool (optHlint opts)
+        , "build: " <> bool (optBuild opts)
+        , "siblings: " <> bool (optSiblings opts)
+        , "dry-run: " <> bool savedDry
+        , "ui-scale: " <> tshow (usUiScale us)
+        ]
+  where
+    bool b = if b then "true" else "false"
 
 setCredentials :: Env -> Credentials -> IO ()
 setCredentials env creds = modifyState env (\s -> s {stCredentials = creds})

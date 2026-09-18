@@ -253,9 +253,7 @@ releaseTrack stops at current = do
                       c = colourAt i
                   if done i || i == at
                     then drawCircle (V2 x cy) 6 c
-                    else do
-                      drawCircle (V2 x cy) 6 (palQuiet palette)
-                      drawCircle (V2 x cy) 4.5 (palGround palette)
+                    else drawStrokeCircle (V2 x cy) 6 1.5 (palQuiet palette)
                   drawText (V2 (x - 6) (cy + 26)) AlignStart AlignMiddle name (if i == at then palText palette else palQuiet palette)
               )
               (zip [0 ..] stops)

@@ -1,11 +1,14 @@
 packages: .
+  -- nano-ui's sdl-ui-scale branch, until it is pushed and the pin below bumped.
+  ../nano-ui-ui-scale/packages/nano-ui
+  ../nano-ui-ui-scale/packages/nano-ui-sdl
 
 -- nano-ui from GitHub, pinned. Bump the tag to pick up upstream changes.
-source-repository-package
-  type: git
-  location: https://github.com/goolord/nano-ui
-  tag: bc934577851e0058729c8744123556541f0148a4
-  subdir: packages/nano-ui packages/nano-ui-sdl
+-- source-repository-package
+--   type: git
+--   location: https://github.com/goolord/nano-ui
+--   tag: 95b49b5484019656a69b1385543f5c0fa8466731
+--   subdir: packages/nano-ui packages/nano-ui-sdl
 
 package nano-ui-sdl
   flags: +sdl

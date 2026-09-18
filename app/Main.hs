@@ -11,7 +11,7 @@ module Main (main) where
 import Cabalist.Git (gitTopLevel)
 import Data.Maybe (fromMaybe)
 import Gui.SelfTest (screenshot, selfTest)
-import Gui.State (lastRepo, newEnv)
+import Gui.State (AppState (..), lastRepo, newEnv, readState, userSettingsFile)
 import Gui.Style (appTheme)
 import Gui.View (appView, newViewCache)
 import NanoUI (Size (..))
@@ -50,9 +50,11 @@ main = do
           if ok then pure d else hPutStrLn stderr ("cabalist: no such directory: " <> d) >> exitFailure
         [] -> startingRepo
         _ -> hPutStrLn stderr "usage: cabalist [--dry-run] [DIRECTORY]" >> exitFailure
-      env <- newEnv dryRun
+      settings <- userSettingsFile
+      env <- newEnv (Just settings) dryRun
       cache <- newViewCache initial
-      runSdlApp windowOptions (appView env cache)
+      scale <- stUiScale <$> readState env
+      runSdlApp windowOptions {sdlAppUiScale = scale} (appView env cache)
 
 -- | The current directory's repository if there is one, else the repository
 -- opened last, else nothing.
