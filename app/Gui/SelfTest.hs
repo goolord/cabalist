@@ -259,6 +259,7 @@ selfTestSteps opts dir = do
     step "login dialog"
     clickWhere "the login button" (\t -> "Log in to Hackage" == t || "Hackage: " `T.isPrefixOf` t)
     expect "API token"
+    click "API token"
     shot "07-login"
     press KeyEscape
 

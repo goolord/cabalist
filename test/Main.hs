@@ -13,6 +13,7 @@ import Data.Text.IO qualified as T
 import Cabalist.Config
 import Cabalist.File (editUtf8, readUtf8, writeUtf8)
 import Cabalist.Hackage
+import Cabalist.Keyring (decodeLogin, encodeLogin)
 import Cabalist.Package
 import Cabalist.Process
 import Cabalist.Release
@@ -66,7 +67,13 @@ unitTests failures = do
   t "parse tag" (parseTagVersion "{name}-v{version}" p "foo-bar-v0.9.1" == Just (ver "0.9.1"))
   t "parse tag of another package" (parseTagVersion "{name}-v{version}" p "foo-v0.9.1" == Nothing)
   t "parse root tag" (parseTagVersion "v{version}" p "v3" == Just (ver "3"))
-  t "upload args, token" (fst (uploadArgs (ApiToken "abc") True False "x.tar.gz") == ["upload", "--token=abc", "--publish", "x.tar.gz"])
+  t "upload args, no token on the command line" (uploadArgs (ApiToken "abc") True False "x.tar.gz" == (["upload", "--publish", "x.tar.gz"], Nothing))
+  t "token config replaces top-level logins" $
+    tokenConfig (Just "username: me\npassword: pw\nrepository hackage.haskell.org\n  url: http://hackage.haskell.org/\n") "abc"
+      == "token: abc\nrepository hackage.haskell.org\n  url: http://hackage.haskell.org/\n"
+  t "token config without a user config" (tokenConfig Nothing "abc" == "token: abc\nrepository hackage.haskell.org\n  url: http://hackage.haskell.org/\n")
+  t "keyring login round trip" (all (\c -> decodeLogin (encodeLogin c) == Just c) [ApiToken "abc", UserPassword "me" "p\235ss:w\nrd"])
+  t "keyring rejects junk" (decodeLogin "hello" == Nothing && decodeLogin "password\n\npw" == Nothing)
   t "upload args, password on stdin" (uploadArgs (UserPassword "me" "pw") False True "d.tar.gz" == (["upload", "--username=me", "--documentation", "d.tar.gz"], Just "pw\n"))
   t "logged commands hide secrets" (renderCommand "cabal" ["upload", "--token=abc", "--password=pw", "x.tar.gz"] == "cabal upload --token=… --password=… x.tar.gz")
 

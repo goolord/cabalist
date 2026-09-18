@@ -27,19 +27,24 @@ module Cabalist.Release
   , bumpPackage
   , commitBump
   , uploadArgs
+  , tokenConfig
+  , cabalConfigFile
   , findCabal
   )
 where
 
 import Control.Exception (SomeException, finally, onException, try)
 import Control.Monad (filterM, forM_, unless, void, when)
+import Data.ByteString qualified as B
+import Data.Char (isSpace)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List (find, maximumBy)
 import Data.Maybe (catMaybes, isJust)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Cabalist.File (editUtf8, writeUtf8)
+import Data.Text.Encoding (encodeUtf8)
+import Cabalist.File (editUtf8, readUtf8, writeUtf8)
 import Data.Time (defaultTimeLocale, formatTime, getCurrentTime)
 import GHC.Clock (getMonotonicTimeNSec)
 import Cabalist.Config
@@ -51,7 +56,9 @@ import Cabalist.Status (PkgStatus (..), isPublished)
 import Cabalist.Version (Bump, findChangelog, setVersionField, addChangelogEntry)
 import Cabalist.Version qualified as V
 import System.Directory
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
+import System.IO (hClose, openTempFile)
 import System.FilePath (getSearchPath, isAbsolute, (<.>), (</>))
 
 -- | How to log in to Hackage for an upload.
@@ -315,7 +322,9 @@ transitiveDeps pkgs p0 = go [] (internalDeps pkgs p0)
       | pkgName q `elem` map pkgName seen || pkgName q == pkgName p0 = go seen qs
       | otherwise = go (q : seen) (qs <> internalDeps pkgs q)
 
--- | The arguments for @cabal upload@, and what to feed its prompts.
+-- | The arguments for @cabal upload@, and what to feed its prompts. A token
+-- is not among them: 'cabalUpload' hands it to cabal in a config file
+-- ('tokenConfig'), since other programs can read a command line.
 uploadArgs :: Credentials -> Bool -> Bool -> FilePath -> ([String], Maybe Text)
 uploadArgs creds isPublish docs file =
   let flags = ["--publish" | isPublish] <> ["--documentation" | docs]
@@ -324,17 +333,62 @@ uploadArgs creds isPublish docs file =
         -- cabal prompts for whatever its config lacks: the username, then
         -- the password.
         UserPassword user pass -> (["upload", "--username=" <> T.unpack user] <> flags <> [file], Just (pass <> "\n"))
-        ApiToken tok -> (["upload", "--token=" <> T.unpack tok] <> flags <> [file], Nothing)
+        ApiToken _ -> (["upload"] <> flags <> [file], Nothing)
+
+-- | The user's cabal config with a token as its Hackage login, in place of
+-- any login it had. Without a config to start from, it names Hackage as the
+-- repository, as cabal's default config does.
+tokenConfig :: Maybe Text -> Text -> Text
+tokenConfig userConfig tok =
+  T.unlines (("token: " <> tok) : maybe defaultRepo (filter (not . loginField) . T.lines) userConfig)
+  where
+    -- Only top-level fields: sections indent theirs.
+    loginField l =
+      let (k, v) = T.breakOn ":" l
+       in not (T.null v) && not (T.null k) && not (isSpace (T.head k)) && T.toLower (T.strip k) `elem` ["token", "username", "password", "password-command"]
+    defaultRepo = ["repository hackage.haskell.org", "  url: http://hackage.haskell.org/"]
+
+-- | Where cabal reads its config: @cabal path --config-file@ asks cabal,
+-- which knows every place it looks. Older cabals lack the command, so for
+-- them follow @CABAL_CONFIG@ and @CABAL_DIR@ as they would.
+cabalConfigFile :: FilePath -> IO FilePath
+cabalConfigFile cabal =
+  readCmdOk "." cabal ["path", "--config-file"] >>= \case
+    Just out | not (T.null (T.strip out)) -> pure (T.unpack (T.strip (T.takeWhileEnd (/= '\n') (T.stripEnd out))))
+    _ -> do
+      configEnv <- lookupEnv "CABAL_CONFIG"
+      dirEnv <- lookupEnv "CABAL_DIR"
+      case (configEnv, dirEnv) of
+        (Just f, _) | not (null f) -> pure f
+        (_, Just d) | not (null d) -> pure (d </> "config")
+        _ -> (</> "config") <$> getAppUserDataDirectory "cabal"
+
+-- | Run an action with a temporary cabal config holding the token, readable
+-- only by the user, removed afterwards.
+withTokenConfig :: Ctx -> Text -> (FilePath -> IO a) -> IO a
+withTokenConfig ctx tok k = do
+  userFile <- cabalConfigFile (ctxCabal ctx)
+  userConfig <- either (\(_ :: SomeException) -> Nothing) Just <$> try (readUtf8 userFile)
+  tmp <- getTemporaryDirectory
+  -- openTempFile creates the file with mode 0600 on Unix; on Windows the
+  -- temporary directory is the user's own.
+  (path, h) <- openTempFile tmp "cabalist-upload.config"
+  (B.hPut h (encodeUtf8 (tokenConfig userConfig tok)) `finally` hClose h >> k path)
+    `finally` void (try (removeFile path) :: IO (Either SomeException ()))
 
 -- | Run @cabal upload@, treating an error in its output as failure too:
 -- older cabals exit successfully when Hackage rejects an upload.
 cabalUpload :: Ctx -> Bool -> Bool -> FilePath -> IO ()
 cabalUpload ctx isPublish docs file = do
-  let (args, input) = uploadArgs (optCredentials (ctxOptions ctx)) isPublish docs file
+  let creds = optCredentials (ctxOptions ctx)
+      (args, input) = uploadArgs creds isPublish docs file
   if optDryRun (ctxOptions ctx)
-    then say ctx ("dry run: would run " <> renderCommand "cabal" args)
+    then say ctx ("dry run: would run " <> renderCommand "cabal" args <> case creds of ApiToken _ -> ", with the token in a temporary config file"; _ -> "")
     else do
-      (code, out) <- runLogged (ctxLog ctx) (ctxRoot ctx) (ctxCabal ctx) args input
+      (code, out) <- case creds of
+        ApiToken tok -> withTokenConfig ctx tok $ \cfg ->
+          runLogged (ctxLog ctx) (ctxRoot ctx) (ctxCabal ctx) (("--config-file=" <> cfg) : args) input
+        _ -> runLogged (ctxLog ctx) (ctxRoot ctx) (ctxCabal ctx) args input
       let rejected = find (\l -> any (`T.isInfixOf` T.toLower l) ["error uploading", "error:", "401 unauthorized", "403 forbidden"]) out
       case (code, rejected) of
         (ExitSuccess, Nothing) -> pure ()

@@ -1,3 +1,4 @@
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE RecordWildCards #-}
 
 -- | The main window.
@@ -30,6 +31,7 @@ import Data.Text qualified as T
 import Data.Traversable (for)
 import Cabalist.Config
 import Cabalist.Hackage
+import Cabalist.Keyring (keyringName)
 import Cabalist.Package
 import Cabalist.Release (Credentials (..), Options (..))
 import Cabalist.Status
@@ -108,6 +110,7 @@ data Vars = Vars
   , loginUser :: !(Var Text)
   , loginPass :: !(Var Text)
   , loginToken :: !(Var Text)
+  , loginRemember :: !(Var Bool)
   , settingsOpen :: !(Var Bool)
   , formatDraft :: !(Var Text)
   , remoteDraft :: !(Var Text)
@@ -142,6 +145,7 @@ useVars = do
   loginUser <- var (useText "")
   loginPass <- var (useText "")
   loginToken <- var (useText "")
+  loginRemember <- var (useFlag False)
   settingsOpen <- var (useFlag False)
   formatDraft <- var (useText "")
   remoteDraft <- var (useText "")
@@ -274,12 +278,20 @@ header frame@Frame {vars = Vars {..}, ..} =
       (_, Just err) -> small palCoral (ellipsize 90 err)
       _ -> when (stHackageLoading st) $ spinnerWith alignMid 14 >> small palQuiet "Asking Hackage"
     flex
+    forM_ (stLoginError st) $ \e -> small palCoral (ellipsize 60 e)
     when (stDryRun st) $ small palAmber "Dry run"
     styled quiet $ do
       whenM (compactButton "Open…") (askFolder frame)
       disabledWhen (isNothing repo || isJust (stLoading st)) $
         whenM (compactButton "Refresh") (uiIO (refresh frame))
-      whenM (compactButton (loginLabel st)) (put loginOpen True)
+      whenM (compactButton (loginLabel st)) $ do
+        -- Show the login in use, as saved or as typed earlier.
+        case stCredentials st of
+          UserPassword u pw -> put loginMode 1 >> put loginUser u >> put loginPass pw
+          ApiToken tok -> put loginMode 2 >> put loginToken tok
+          FromCabalConfig -> put loginMode 0
+        put loginRemember (stLoginSaved st)
+        put loginOpen True
       whenM (compactButton "Settings") $ do
         forM_ repo $ \r -> do
           put formatDraft (cfgTagFormat (repoConfig r))
@@ -890,12 +902,20 @@ loginDialog Frame {vars = Vars {..}, ..} = do
         2 ->
           bind loginToken (textInputConfigured defaultTextInputConfig {ticPlaceholder = "API token", ticPassword = True, ticLayout = fillW (ticLayout defaultTextInputConfig)})
         _ -> pure ()
-      note "Kept in memory until cabalist closes."
+      let keyring = envKeyring env
+      when (keyring && val loginMode /= 0) $
+        bind loginRemember (checkbox ("Remember it in " <> keyringName))
+      note $
+        if
+          | keyring && val loginMode /= 0 && val loginRemember -> "Saved in " <> keyringName <> ", for the next time cabalist starts."
+          | keyring && stLoginSaved st -> "The login saved in " <> keyringName <> " will be removed."
+          | val loginMode == 0 -> "cabal reads its config for each upload."
+          | otherwise -> "Kept in memory until cabalist closes."
       separator
       buttonsRow "Use this login" primary (not complete)
   forM_ chosen $ \((), c) -> do
     case c of
-      ChoiceOk -> uiIO (setCredentials env creds)
+      ChoiceOk -> uiIO (setCredentials env creds (val loginRemember))
       ChoiceCancel -> pure ()
     put loginOpen False
   where

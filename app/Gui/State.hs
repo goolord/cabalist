@@ -43,13 +43,14 @@ module Gui.State
 where
 
 import Control.Concurrent (Chan, forkIO, newChan, readChan, writeChan)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
 import Control.Exception (SomeException, displayException, fromException, try)
 import Control.Monad (forM, forM_, forever, join, unless, void, when)
 import Data.Foldable (toList)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
 import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
 import Data.Set (Set)
@@ -61,6 +62,7 @@ import GHC.Clock (getMonotonicTime)
 import Cabalist.Config
 import Cabalist.Git (currentBranch, gitTopLevel)
 import Cabalist.Hackage
+import Cabalist.Keyring (keyringName, loadLogin, saveLogin)
 import Cabalist.Package
 import Cabalist.Process
 import Cabalist.Release
@@ -156,6 +158,13 @@ data AppState = AppState
   , stCabalLogin :: !(Maybe Text)
   -- ^ The kind of Hackage login cabal's config file holds, if any.
   , stCredentials :: !Credentials
+  , stLoginSaved :: !Bool
+  -- ^ Whether 'stCredentials' is the login saved in the keyring.
+  , stLoginChosen :: !Bool
+  -- ^ Whether a login was chosen in the dialog, which a saved login read
+  -- afterwards must not replace.
+  , stLoginError :: !(Maybe Text)
+  -- ^ Why the keyring could not be read or written.
   , stDryRun :: !Bool
   , stOptions :: !Options
   -- ^ How steps build: hlint, the pristine build, sibling packages.
@@ -174,6 +183,11 @@ data Env = Env
   -- ^ Where the build settings and dry run are kept; none for self-tests.
   , envDryRunFlag :: !Bool
   -- ^ Whether @--dry-run@ was given, which forces a dry run without saving it.
+  , envKeyring :: !Bool
+  -- ^ Whether logins can be saved in the keyring: not in self-tests, which
+  -- have no settings file either.
+  , envKeyringLock :: !(MVar ())
+  -- ^ Held while the keyring is read or written, so changes apply in order.
   }
 
 tshow :: Show a => a -> Text
@@ -201,6 +215,9 @@ newEnv file dryRunFlag = do
           , stCabal = Nothing
           , stCabalLogin = Nothing
           , stCredentials = FromCabalConfig
+          , stLoginSaved = False
+          , stLoginChosen = False
+          , stLoginError = Nothing
           , stDryRun = dryRun
           , stOptions = usOptions saved
           , stUiScale = usUiScale saved
@@ -211,7 +228,10 @@ newEnv file dryRunFlag = do
       <*> newIORef Nothing
       <*> pure file
       <*> pure dryRunFlag
+      <*> pure (isJust file)
+      <*> newMVar ()
   void . forkIO $ detectCabal env
+  when (envKeyring env) . void . forkIO $ loadSavedLogin env
   void . forkIO . forever $ readChan (envQueue env) >>= runJob env
   pure env
 
@@ -238,10 +258,7 @@ detectCabal env = do
 -- whatever an upload needs from there without asking.
 cabalConfigLogin :: FilePath -> IO (Maybe Text)
 cabalConfigLogin cabal = do
-  reported <- readCmdOk "." cabal ["path", "--config-file"]
-  fallback <- (</> "config") <$> getAppUserDataDirectory "cabal"
-  let file = maybe fallback (T.unpack . T.strip . T.takeWhileEnd (/= '\n')) reported
-  r <- try (readUtf8 file)
+  r <- try (cabalConfigFile cabal >>= readUtf8)
   pure $ case r of
     Left (_ :: SomeException) -> Nothing
     Right src ->
@@ -447,8 +464,33 @@ saveUserSettings env us = do
   where
     bool b = if b then "true" else "false"
 
-setCredentials :: Env -> Credentials -> IO ()
-setCredentials env creds = modifyState env (\s -> s {stCredentials = creds})
+-- | Use a login, and save it in the keyring or forget the saved one. The
+-- keyring is asked in the background: it can show a dialog of its own.
+setCredentials :: Env -> Credentials -> Bool -> IO ()
+setCredentials env creds remember = do
+  modifyState env (\s -> s {stCredentials = creds, stLoginChosen = True})
+  when (envKeyring env) . void . forkIO . withMVar (envKeyringLock env) $ \() -> do
+    saved <- stLoginSaved <$> readState env
+    let keep = remember && creds /= FromCabalConfig
+    unless (not keep && not saved) $ do
+      r <- saveLogin (if keep then creds else FromCabalConfig)
+      modifyState env $ \s -> case r of
+        Right () -> s {stLoginSaved = keep, stLoginError = Nothing}
+        Left e ->
+          s
+            { stLoginSaved = saved
+            , stLoginError = Just ((if keep then "Could not save the login in " else "Could not remove the login from ") <> keyringName <> ": " <> e)
+            }
+
+-- | Use the login saved in the keyring, unless one was chosen meanwhile.
+loadSavedLogin :: Env -> IO ()
+loadSavedLogin env =
+  withMVar (envKeyringLock env) $ \() ->
+    loadLogin >>= \case
+      Right Nothing -> pure ()
+      Right (Just creds) -> modifyState env $ \s ->
+        if stLoginChosen s then s else s {stCredentials = creds, stLoginSaved = True}
+      Left e -> modifyState env (\s -> s {stLoginError = Just ("Could not read the saved login from " <> keyringName <> ": " <> e)})
 
 --------------------------------------------------------------------------------
 -- Jobs

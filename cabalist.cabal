@@ -18,6 +18,8 @@ build-type:         Simple
 extra-doc-files:
     CHANGELOG.md
     README.md
+extra-source-files:
+    cbits/*.c
 
 common shared
     default-language: GHC2024
@@ -35,6 +37,7 @@ library
         Cabalist.File
         Cabalist.Git
         Cabalist.Hackage
+        Cabalist.Keyring
         Cabalist.Package
         Cabalist.Process
         Cabalist.Release
@@ -50,6 +53,16 @@ library
         process >=1.6.9 && <1.7,
         text >=2.0 && <2.2,
         time >=1.12 && <1.16
+    if os(windows)
+        other-modules: Cabalist.Keyring.Windows
+        c-sources:     cbits/keyring_windows.c
+        extra-libraries: advapi32
+    elif os(darwin)
+        other-modules: Cabalist.Keyring.MacOS
+        c-sources:     cbits/keyring_macos.c
+        frameworks:    Security CoreFoundation
+    else
+        other-modules: Cabalist.Keyring.SecretService
 
 executable cabalist
     import:           shared

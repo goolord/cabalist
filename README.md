@@ -70,9 +70,13 @@ published again, as with hkgr.
 
 cabal uploads with whatever login its config file holds (a token, a password
 command, or a username and password). Without one, set a username and
-password or an API token with *Log in to Hackage*. They stay in memory until
-cabalist closes; a password reaches cabal on its standard input, not its
-command line.
+password or an API token with *Log in to Hackage*. *Remember it* saves the
+login in the operating system's keyring (Windows Credential Manager, the
+macOS keychain, or the Secret Service through `secret-tool` on Linux) for the
+next time cabalist starts; otherwise it stays in memory until cabalist
+closes. Neither kind reaches cabal on its command line, where other programs
+could read it: a password goes on cabal's standard input, and a token in a
+temporary copy of cabal's config file, deleted after the upload.
 
 ## Trying it safely
 

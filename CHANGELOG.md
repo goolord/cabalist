@@ -7,3 +7,6 @@
   changelog entries, tag and sdist from a pristine clone, pristine builds,
   candidate and documentation uploads, and publishing, singly or in batches
   in dependency order.
+* Remember a Hackage login in the operating system's keyring, and pass an
+  API token to cabal in a temporary config file rather than on its command
+  line.
