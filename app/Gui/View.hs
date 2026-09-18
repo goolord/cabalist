@@ -440,8 +440,8 @@ emptyState frame =
 packageRelease :: Frame -> Repo -> Package -> Maybe PkgStatus -> NanoUI ()
 packageRelease frame@Frame {vars = Vars {..}} r p mStatus = do
   rowWith (fillW . gap 12 . tight) $ do
-    labelWith (tight . alignBottom . fontSize sizeDisplay . fontSemiBold . ink palText) (pkgName p)
-    labelWith (tight . alignBottom . fontSize sizeTitle . ink palQuiet) (showVersion (pkgVersion p))
+    labelWith (tight . alignBaseline . fontSize sizeDisplay . fontSemiBold . ink palText) (pkgName p)
+    labelWith (tight . alignBaseline . fontSize sizeTitle . ink palQuiet) (showVersion (pkgVersion p))
   unless (T.null (pkgSynopsis p)) $ do
     spacer Fit (Fixed 4)
     labelWith (tight . ink palMuted) (pkgSynopsis p)

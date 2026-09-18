@@ -5,6 +5,8 @@ stepped style of [hkgr](https://github.com/juhp/hkgr), built on
 [nano-ui](https://github.com/goolord/nano-ui). It works with a repository
 holding one package at its root or many in subdirectories of a monorepo.
 
+![cabalist with a two-package monorepo, one package's candidate up on Hackage](docs/screenshot.png)
+
 Open a git repository and cabalist lists every Cabal package in it. Each
 package's release is a track of four stops, with one button for the next
 step:
