@@ -264,7 +264,22 @@ pristineBuild ctx p = do
   unless exists $ failStep ("no tarball yet: tag and sdist first (" <> T.pack tarball <> ")")
   withUnpacked ctx p $ \dir -> do
     say ctx ("# building " <> pkgId p <> " from its tarball")
-    () <$ run ctx dir (ctxCabal ctx) ["build"]
+    () <$ cabalUnpacked ctx dir ["build"]
+
+-- | Run cabal in an unpacked tarball. There a dependency comes from Hackage
+-- rather than the repository, so a package published since the last
+-- @cabal update@ is unknown to cabal; update the index and try once more.
+cabalUnpacked :: Ctx -> FilePath -> [String] -> IO [Text]
+cabalUnpacked ctx dir args = do
+  (code, out) <- runLogged (ctxLog ctx) dir (ctxCabal ctx) args Nothing
+  case code of
+    ExitSuccess -> pure out
+    ExitFailure _
+      | any ("unknown package: " `T.isInfixOf`) out -> do
+          say ctx "# cabal's package index is missing a package; updating it and trying again"
+          () <$ run ctx dir (ctxCabal ctx) ["update"]
+          run ctx dir (ctxCabal ctx) args
+      | otherwise -> failStep ("cabal " <> T.pack (unwords (take 1 args)) <> " failed")
 
 -- | Unpack the tarball in a temporary directory and run an action in the
 -- package directory inside it, which has a project file of its own.
@@ -386,7 +401,7 @@ uploadDocs :: Ctx -> Package -> Bool -> IO ()
 uploadDocs ctx p isPublish = do
   unless (pkgHasLibrary p) $ failStep (pkgName p <> " has no library to document")
   withUnpacked ctx p $ \dir -> do
-    out <- run ctx dir (ctxCabal ctx) ["haddock", "--haddock-for-hackage", "--enable-documentation"]
+    out <- cabalUnpacked ctx dir ["haddock", "--haddock-for-hackage", "--enable-documentation"]
     docs <- findDocsTarball dir out
     case docs of
       Nothing -> failStep "cabal haddock did not report a documentation tarball"
