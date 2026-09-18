@@ -238,8 +238,7 @@ selfTestSteps opts dir = do
     click "Hide log"
 
     step "more menu, then the bump dialog"
-    expect "Redo tag and build"
-    expect "Update candidate"
+    expect "Back"
     click "More"
     shot "04-more"
     click "Bump version…"
@@ -271,24 +270,34 @@ selfTestSteps opts dir = do
     click "Cancel"
     expectGone "Building"
 
-    step "a candidate is up: its link, and updating it"
+    step "a candidate is up: its link, and republishing it"
     -- A dry run uploads nothing, so mark the candidate uploaded as a real
     -- upload would, then read the repository again.
     T.writeFile (root </> ".cabalist" </> "cabalist-demo-app-0.1.0.0.tar.gz.candidate") "cabalist-demo-app-0.1.0.0\n"
     refreshRepo env
-    expect "Update candidate"
+    expect "Republish candidate"
     expect "The candidate is on Hackage"
     shot "09-candidate-up"
-    click "Update candidate"
+    click "Republish candidate"
     st3 <- waitForJobs
     case reverse (toList (stJobs st3)) of
       (j : _) | jobStatus j == JobSucceeded, optForce (jobOptions j) -> pure ()
-      js -> dumpVisible >> fail ("updating the candidate did not succeed: " <> show [(jobAction j, jobStatus j) | j <- js])
-    expect "Update candidate cabalist-demo-app-0.1.0.0"
+      js -> dumpVisible >> fail ("republishing the candidate did not succeed: " <> show [(jobAction j, jobStatus j) | j <- js])
+    expect "Republish candidate cabalist-demo-app-0.1.0.0"
     -- The new tarball replaced the uploaded one, so it waits to be uploaded.
     -- (The candidate link is rich text, which the span collector does not
     -- report; 09-candidate-up.bmp shows it.)
-    expect "Upload candidate"
+    expect "The tarball is built"
+
+    step "back to before the tag"
+    click "Back"
+    st4 <- waitForJobs
+    case reverse (toList (stJobs st4)) of
+      (j : _) | jobStatus j == JobSucceeded, jobAction j == ActUntag -> pure ()
+      js -> dumpVisible >> fail ("going back did not succeed: " <> show [(jobAction j, jobStatus j) | j <- js])
+    expect "This version has not been released"
+    expect "Tag and build"
+    expectGone "Back"
 
     step "several packages: dependencies first, candidates uploaded (dry run)"
     click "Select"
@@ -298,7 +307,7 @@ selfTestSteps opts dir = do
     shot "10-select"
     click "Upload candidates"
     st2 <- waitForJobs
-    let batch = drop 2 (toList (stJobs st2))
+    let batch = drop 3 (toList (stJobs st2))
     case batch of
       [core, app]
         | pkgName (jobPackage core) == "cabalist-demo-core"
@@ -311,6 +320,8 @@ selfTestSteps opts dir = do
         dumpVisible
         fail ("the batch did not run in dependency order: " <> show [(pkgName (jobPackage j), jobStatus j) | j <- batch])
     click "Show log"
+    -- The log was scrolled up earlier, so it no longer follows new lines.
+    click "Follow"
     expect "candidate: https://hackage.haskell.org/package/cabalist-demo-app-0.1.0.0/candidate"
     shot "11-batch-done"
 

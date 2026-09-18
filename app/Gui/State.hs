@@ -77,6 +77,7 @@ import Text.Read (readMaybe)
 data Action
   = ActCheck
   | ActTagDist
+  | ActUntag
   | ActBuild
   | ActUpload
   | ActUploadDocs
@@ -92,6 +93,7 @@ actionLabel :: Action -> Text
 actionLabel = \case
   ActCheck -> "Check package"
   ActTagDist -> "Tag and build"
+  ActUntag -> "Remove tag and tarball"
   ActBuild -> "Rebuild from tarball"
   ActUpload -> "Upload candidate"
   ActUploadDocs -> "Upload candidate docs"
@@ -629,6 +631,7 @@ runAction env repo st job = do
   case jobAction job of
     ActCheck -> cabalCheck ctx p
     ActTagDist -> tagDist ctx p
+    ActUntag -> untag ctx p
     ActBuild -> pristineBuild ctx p
     ActUpload -> upload ctx p
     ActUploadDocs -> uploadDocs ctx p False

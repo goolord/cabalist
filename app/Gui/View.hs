@@ -4,8 +4,8 @@
 -- | The main window.
 --
 -- A release is shown as a track of four stops (version, tag, candidate,
--- published) with one button for the next step, and beside it buttons to
--- redo the tag or update the candidate once there is a tag. Everything else
+-- published) with one button for the next step, one to go back a step
+-- and tag again, and one to republish a candidate. Everything else
 -- a release can need (checks, rebuilds, documentation) waits in a menu, and
 -- build settings live in the settings dialog. Work runs in the background; a
 -- one-line activity bar reports it, and opens onto the log.
@@ -507,9 +507,9 @@ hint next s = case next of
   StageNeedsBump
     | newer -> countOf (length (psUntagged s)) "commit" <> " changed the package since this version was released. Bump the version to release again."
   StageCandidate
-    | newer -> "The tarball was built before the latest commits. Update the candidate to tag them, rebuild, and upload, or upload it as it is."
+    | newer -> "The tarball was built before the latest commits. Go back to tag them, or upload it as it is."
   StageUploaded
-    | newer -> "The candidate on Hackage predates the latest commits. Update it to include them, or publish it as it is."
+    | newer -> "The candidate on Hackage predates the latest commits. Republish it to include them, or publish it as it is."
   _ -> stageHint next
   where
     newer = not (null (psUntagged s))
@@ -560,22 +560,17 @@ actions frame@Frame {vars = Vars {..}, ..} p s next =
         spinnerWith alignMid 18
         labelWith (tight . alignMid . ink palMuted) (actionLabel (jobAction j) <> (if jobStatus j == JobQueued then ", waiting" else ""))
       Nothing -> do
+        when (canGoBack next) $ whenM (styled quiet (actionButton "Back")) (queue ActUntag)
         forM_ (primaryStep next) $ \(txt, go) -> whenM (styled primary (actionButton txt)) go
-        styled quiet $ forM_ (secondarySteps next <> redoSteps) $ \(txt, go) -> whenM (actionButton txt) go
+        styled quiet $ forM_ (secondarySteps next) $ \(txt, go) -> whenM (actionButton txt) go
     moreMenu frame p s next
   where
     busy = find (\j -> pkgName (jobPackage j) == pkgName p && not (jobFinished (jobStatus j))) jobs
     queue action = uiIO (enqueue env False [(p, action)])
-    -- Once there is a tag, it can be moved to HEAD and everything after it
-    -- made again, until the version is published.
-    redoSteps =
-      [ step
-      | not (isPublished p s)
-      , not (psVersionUncommitted s)
-      , isJust (psTagCommit s)
-      , step <- [("Redo tag and build", redoTag), ("Update candidate", updateCandidate)]
-      ]
-    redoTag = uiIO (enqueue env True [(p, ActTagDist)])
+    -- Back to before the tag, to tag again: the tag is only local until the
+    -- version is published. A candidate on Hackage cannot be taken back, so
+    -- once one is up it is republished instead.
+    canGoBack = (`elem` [StageTagged, StageCandidate])
     askBump = put bumpFor (Just (pkgName p))
     askPublish = put pending (Just (Pending ("Publish " <> pkgId p) [(p, ActPublish)]))
     primaryStep = \case
@@ -588,10 +583,11 @@ actions frame@Frame {vars = Vars {..}, ..} p s next =
       StageReleased -> Nothing
     secondarySteps = \case
       StageCandidate -> [("Publish now…", askPublish)]
+      StageUploaded -> [("Republish candidate", republish)]
       _ -> []
     -- Move the tag to HEAD, make the tarball again over the old one, and
     -- upload it as the candidate, as hkgr's upload --force does.
-    updateCandidate = uiIO (enqueue env True [(p, ActUpload)])
+    republish = uiIO (enqueue env True [(p, ActUpload)])
 
 -- | Everything a release can need that is not its next step.
 moreMenu :: Frame -> Package -> PkgStatus -> Stage -> NanoUI ()
@@ -700,11 +696,10 @@ activity frame@Frame {vars = Vars {..}, ..} =
 describe :: Job -> Text
 describe j = jobName j <> " " <> pkgId (jobPackage j)
 
--- | A step's name, as its button said: a forced tag or upload redoes the tag.
+-- | A step's name, as its button said: a forced upload redoes the tag.
 jobName :: Job -> Text
 jobName j
-  | jobAction j == ActTagDist && optForce (jobOptions j) = "Redo tag and build"
-  | jobAction j == ActUpload && optForce (jobOptions j) = "Update candidate"
+  | jobAction j == ActUpload && optForce (jobOptions j) = "Republish candidate"
   | otherwise = actionLabel (jobAction j)
 
 outcome :: Double -> Job -> Text

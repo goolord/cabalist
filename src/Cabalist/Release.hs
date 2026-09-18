@@ -20,6 +20,7 @@ module Cabalist.Release
   , checkPackage
   , cabalCheck
   , tagDist
+  , untag
   , pristineBuild
   , upload
   , publish
@@ -196,6 +197,25 @@ assertTagOnBranch :: Ctx -> Text -> IO ()
 assertTagOnBranch ctx tag = do
   onBranch <- tagOnBranch (ctxRoot ctx) tag
   unless onBranch $ failStep (tag <> " is no longer on a branch: use Force to move it")
+
+-- | Step back to before the tag: delete the tarball and the tag, so the
+-- version can be tagged again. Only the local tag goes, as tags are pushed
+-- when a version is published, and a published version cannot step back.
+untag :: Ctx -> Package -> IO ()
+untag ctx p = do
+  let root = ctxRoot ctx
+      tag = tagOf ctx p
+  when (isPublished p (ctxStatus ctx)) $ failStep (pkgId p <> " is published: its tag stays")
+  -- The window may still have shown Back as the upload finished.
+  when (psCandidateUploaded (ctxStatus ctx)) $
+    failStep ("the candidate for " <> pkgId p <> " is on Hackage: republish it instead")
+  forM_ [candidateMarker root p, tarballPath root p] $ \f -> do
+    exists <- doesFileExist f
+    when exists $ removeFile f >> say ctx ("removed " <> T.pack f)
+  tagExists <- isJust <$> tagCommit root tag
+  when tagExists $ do
+    git_ ctx ["tag", "--delete", T.unpack tag]
+    say ctx ("deleted tag " <> tag)
 
 -- | A fresh directory under the system temporary directory, removed after.
 withTempDir :: Text -> (FilePath -> IO a) -> IO a
