@@ -183,8 +183,8 @@ warnings p s =
   catMaybes
     [ whenTrue (pkgNameMismatch p) "The .cabal file isn't named after the package. Hackage rejects that."
     , whenTrue (not (null (psDirty s))) (count (length (psDirty s)) "file has" "files have" <> " uncommitted changes. They won't be in the release.")
-    , whenTrue (isJust (psTagCommit s) && not (psTagOnBranch s)) "The tag isn't on any branch any more. Redo the tag to release."
-    , whenTrue (not released && not (null (psUntagged s))) (count (length (psUntagged s)) "commit after the tag touches" "commits after the tag touch" <> " this package. The tarball doesn't have them until the tag is redone.")
+    , whenTrue (isJust (psTagCommit s) && not (psTagOnBranch s)) "The tag isn't on any branch any more. Replace the tag and tarball to release."
+    , whenTrue (not released && not (null (psUntagged s))) (count (length (psUntagged s)) "commit after the tag touches" "commits after the tag touch" <> " this package. The tarball doesn't have them until the tag and tarball are replaced.")
     , whenTrue (not released && psChangelog s == Nothing) "The package has no changelog."
     , whenTrue (not released && isJust (psChangelog s) && not (psChangelogHasEntry s)) ("The changelog has no entry for " <> showVersion (pkgVersion p) <> ".")
     , case psHackage s of

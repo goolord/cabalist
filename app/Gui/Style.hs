@@ -28,14 +28,18 @@ module Gui.Style
   , iconCross
   , iconDot
     -- * Release track
+  , Stop (..)
   , releaseTrack
   , drawKey
   )
 where
 
+import Control.Monad (when)
 import Data.Char (ord)
+import Data.Maybe (isNothing, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Traversable (for)
 import NanoUI
 import NanoUI.Testing (UiCursorKind (..))
 
@@ -218,47 +222,78 @@ iconCheck = svg "<path d=\"M5 12.5l4.5 4.5L19 7.5\" stroke-width=\"2.5\"/>"
 iconCross = svg "<path d=\"M7 7l10 10M17 7L7 17\" stroke-width=\"2.5\"/>"
 iconDot = svg "<circle cx=\"12\" cy=\"12\" r=\"4.5\" fill=\"currentColor\" stroke=\"none\"/>"
 
+-- | A stop on the release track: its name, and what clicking it would do,
+-- when there is anything to do there from where the release stands.
+data Stop = Stop
+  { stopName :: !Text
+  , stopDoes :: !(Maybe Text)
+  }
+
 -- | The stops of a release, with the one the package is at. Stops before it
 -- are done (sage), it is drawn in @current@'s colour, and later ones are
 -- open circles on an unlit line. Past the last stop, every stop is done.
-releaseTrack :: [Text] -> Int -> Color -> NanoUI ()
+--
+-- A stop with something to do is a control of its own: its dot and its name
+-- light under the pointer, it says what clicking it would do, and the track
+-- answers with the stop clicked. That is how a release goes back a step,
+-- as the buttons beside the track only offer the step ahead.
+releaseTrack :: [Stop] -> Int -> Color -> NanoUI (Maybe Int)
 releaseTrack stops at current = do
-  _ <-
-    customWidget
-      defaultCustomWidgetSpec
-        { widgetLayout = (fillW . maxW 720 . fixedH 56) defaultLayout
-        , widgetContent = drawKey (T.intercalate "\0" stops) [current] [fromIntegral at]
-        , widgetDraw = \_ r -> runCanvas $ do
-            let n = length stops
-                inset = 9
-                x0 = rectX r + inset
-                x1 = rectX r + rectW r - inset - 90
-                cy = rectY r + 12
-                xAt i = if n <= 1 then x0 else x0 + (x1 - x0) * fromIntegral i / fromIntegral (n - 1)
-                done i = i < at
-                colourAt i
-                  | done i = palSage palette
-                  | i == at = current
-                  | otherwise = palBorder palette
-            -- The line between stops, lit up to the current one.
-            mapM_
-              ( \i -> do
-                  let lit = done (i + 1) || (i + 1 == at)
-                  drawRect (Rect (xAt i + 8) (cy - 1) (xAt (i + 1) - xAt i - 16) 2) (if lit then palSage palette else palLine palette)
-              )
-              [0 .. n - 2]
-            mapM_
-              ( \(i, name) -> do
-                  let x = xAt i
-                      c = colourAt i
-                  if done i || i == at
-                    then drawCircle (V2 x cy) 6 c
-                    else drawStrokeCircle (V2 x cy) 6 1.5 (palQuiet palette)
-                  drawText (V2 (x - 6) (cy + 26)) AlignStart AlignMiddle name (if i == at then palText palette else palQuiet palette)
-              )
-              (zip [0 ..] stops)
-        }
-  pure ()
+  hits <- rowWith (fillW . maxW 720 . fixedH 56 . gap 0 . tight) $
+    for (zip [0 ..] stops) $ \(i, stop) -> withKey i (cell i stop)
+  pure (listToMaybe [i | (i, True) <- hits])
+  where
+    n = length stops
+    -- A stop's cell begins at its dot and runs to the next one, so clicking
+    -- anywhere along the line picks the stop it comes from. The last stop
+    -- has no line to carry, only room for its name.
+    cell i (Stop name does) =
+      fmap ((,) i) $
+        disabledWhen (isNothing does) $
+          columnWith (share i . fillH . gap 6 . tight) $ do
+            dotResp <- stopDot i
+            nameResp <- stopLabel i name
+            mapM_ (tooltip dotResp) does
+            mapM_ (tooltip nameResp) does
+            pure (respClicked dotResp || respClicked nameResp)
+    share i l = l {layoutWidth = Grow (if i == n - 1 then 0.5 else 1)}
+    stopDot i =
+      fst
+        <$> customWidget
+          defaultCustomWidgetSpec
+            { widgetLayout = (fillW . fixedH 24) defaultLayout
+            , widgetContent = drawKey "" [current] [fromIntegral at, fromIntegral i, fromIntegral n]
+            , widgetDraw = \dc r -> runCanvas $ do
+                let cx = rectX r + inset
+                    cy = rectY r + rectH r / 2
+                -- The line to the next stop, lit once that stop has been
+                -- reached. It crosses into the next cell, which draws the
+                -- sliver of it that falls on its own side.
+                when (i < n - 1) $
+                  drawRect (Rect (cx + 8) (cy - 1) (rectW r - inset - 8) 2) (lineInto (i + 1))
+                when (i > 0) $
+                  drawRect (Rect (rectX r) (cy - 1) (inset - 8) 2) (lineInto i)
+                if reached i
+                  then drawCircle (V2 cx cy) 6 (dotColour i)
+                  else drawStrokeCircle (V2 cx cy) 6 1.5 (palQuiet palette)
+                when (cdcHovered dc) $ drawStrokeCircle (V2 cx cy) 10 1.5 (dotColour i)
+            , widgetCursor = Just (const UiCursorPointer)
+            }
+    stopLabel i txt = do
+      fm <- uiFontMetrics
+      styled quiet $
+        buttonWith'
+          (fixedWH (lineWidth fm txt + 16) 26 . alignStart . alignMid . fontColor (if i == at then palText palette else palQuiet palette))
+          txt
+    -- The dot sits a ring's width in from the cell's edge, so the ring the
+    -- pointer draws around it is not clipped away.
+    inset = 11
+    reached i = i <= at
+    dotColour i
+      | i < at = palSage palette
+      | i == at = current
+      | otherwise = palQuiet palette
+    lineInto i = if reached i then palSage palette else palLine palette
 
 -- | A 'widgetContent' key covering text, colours and numbers: a custom
 -- widget whose key is unchanged is not redrawn.

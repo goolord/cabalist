@@ -4,11 +4,14 @@
 -- | The main window.
 --
 -- A release is shown as a track of four stops (version, tag, candidate,
--- published) with one button for the next step, one to go back a step
--- and tag again, and one to republish a candidate. Everything else
--- a release can need (checks, rebuilds, documentation) waits in a menu, and
--- build settings live in the settings dialog. Work runs in the background; a
--- one-line activity bar reports it, and opens onto the log.
+-- published). Each stop is a control: clicking the one the release is at
+-- takes the next step, and clicking one it has passed makes that stop's
+-- result again -- the tag and tarball replaced, a candidate on Hackage
+-- republished. Beside the track, one button repeats the next step and
+-- another offers what else fits the moment. Everything else a release can
+-- need (checks, rebuilds, documentation) waits in a menu, and build settings
+-- live in the settings dialog. Work runs in the background; a one-line
+-- activity bar reports it, and opens onto the log.
 module Gui.View
   ( ViewCache
   , newViewCache
@@ -469,7 +472,9 @@ packageRelease frame@Frame {vars = Vars {..}} r p mStatus = do
     Just s -> do
       let next = stage p s
           (at, colour) = trackPosition next
-      releaseTrack ["Version", "Tag", "Candidate", "Published"] at colour
+          steps = trackSteps frame p next
+      clicked <- releaseTrack [Stop name (fst <$> step) | (name, step) <- zip trackNames steps] at colour
+      forM_ (clicked >>= atStop steps) snd
       spacer Fit (Fixed 16)
       labelWith (tight . fillW . ink palText) (hint next s)
       spacer Fit (Fixed 18)
@@ -499,6 +504,56 @@ trackPosition = \case
   StageUploaded -> (3, palPurpleInk palette)
   StageReleased -> (4, palSage palette)
 
+trackNames :: [Text]
+trackNames = ["Version", "Tag", "Candidate", "Published"]
+
+-- | What each stop on the track does when it is clicked, named as its button
+-- or the log would name it. The stop the release is at takes the next step;
+-- a stop behind it makes its result over again, which is how a release goes
+-- back: the tag is local until the version is published, so it and its
+-- tarball can be replaced until then, and a candidate already on Hackage
+-- cannot be taken back but can be republished over. A stop with nothing to
+-- do from here is dead, as are all of them while the package is busy.
+trackSteps :: Frame -> Package -> Stage -> [Maybe (Text, NanoUI ())]
+trackSteps frame@Frame {vars = Vars {..}, ..} p next
+  | isJust (busyWith frame p) = map (const Nothing) trackNames
+  | otherwise = [version, tag, candidate, published]
+  where
+    queue force action = uiIO (enqueue env force [(p, action)])
+    version = case next of
+      StageCommitBump -> Just ("Commit version bump", queue False ActCommitBump)
+      _ -> Just ("Bump version…", put bumpFor (Just (pkgName p)))
+    tag = case next of
+      StageReadyToTag -> Just ("Tag and build", queue False ActTagDist)
+      StageTagged -> Just ("Build tarball", queue False ActTagDist)
+      StageCandidate -> replaceTag
+      StageUploaded -> replaceTag
+      _ -> Nothing
+    replaceTag = Just (replaceTagLabel, queue True ActTagDist)
+    candidate = case next of
+      StageCandidate -> Just ("Upload candidate", queue False ActUpload)
+      StageUploaded -> Just ("Republish candidate", queue True ActUpload)
+      _ -> Nothing
+    published = case next of
+      StageCandidate -> Just ("Publish now…", askPublish)
+      StageUploaded -> Just ("Publish…", askPublish)
+      _ -> Nothing
+    askPublish = put pending (Just (Pending ("Publish " <> pkgId p) [(p, ActPublish)]))
+
+-- | Moving the tag to HEAD and making the tarball again over the old one, as
+-- hkgr's @dist --force@ does.
+replaceTagLabel :: Text
+replaceTagLabel = "Replace the tag and tarball"
+
+-- | One stop's step, for a stop that is on the track.
+atStop :: [Maybe a] -> Int -> Maybe a
+atStop steps i = join (listToMaybe (drop i steps))
+
+-- | The job in hand for a package, if it has one.
+busyWith :: Frame -> Package -> Maybe Job
+busyWith Frame {jobs = js} p =
+  find (\j -> pkgName (jobPackage j) == pkgName p && not (jobFinished (jobStatus j))) js
+
 -- | What the release is waiting for, with what is known about it.
 hint :: Stage -> PkgStatus -> Text
 hint next s = case next of
@@ -507,7 +562,7 @@ hint next s = case next of
   StageNeedsBump
     | newer -> countOf (length (psUntagged s)) "commit" <> " changed the package since this version was released. Bump the version to release again."
   StageCandidate
-    | newer -> "The tarball was built before the latest commits. Go back to tag them, or upload it as it is."
+    | newer -> "The tarball was built before the latest commits. Replace the tag and tarball to include them, or upload it as it is."
   StageUploaded
     | newer -> "The candidate on Hackage predates the latest commits. Republish it to include them, or publish it as it is."
   _ -> stageHint next
@@ -551,43 +606,27 @@ unreleasedDependencies r p =
       ]
 
 -- | The next step as the one filled button, what else fits this moment
--- beside it, and everything else in a menu.
+-- beside it, and everything else in a menu. Each is a stop on the track: the
+-- stop the release is at, and the one other stop worth a button of its own.
 actions :: Frame -> Package -> PkgStatus -> Stage -> NanoUI ()
-actions frame@Frame {vars = Vars {..}, ..} p s next =
+actions frame p s next =
   rowWith (fillW . gap 10 . alignMid . tight) $ do
-    case busy of
+    case busyWith frame p of
       Just j -> do
         spinnerWith alignMid 18
         labelWith (tight . alignMid . ink palMuted) (actionLabel (jobAction j) <> (if jobStatus j == JobQueued then ", waiting" else ""))
       Nothing -> do
-        when (canGoBack next) $ whenM (styled quiet (actionButton "Back")) (queue ActUntag)
-        forM_ (primaryStep next) $ \(txt, go) -> whenM (styled primary (actionButton txt)) go
-        styled quiet $ forM_ (secondarySteps next) $ \(txt, go) -> whenM (actionButton txt) go
+        forM_ (atStop steps (fst (trackPosition next))) $ \(txt, go) -> whenM (styled primary (actionButton txt)) go
+        styled quiet $ forM_ beside $ \(txt, go) -> whenM (actionButton txt) go
     moreMenu frame p s next
   where
-    busy = find (\j -> pkgName (jobPackage j) == pkgName p && not (jobFinished (jobStatus j))) jobs
-    queue action = uiIO (enqueue env False [(p, action)])
-    -- Back to before the tag, to tag again: the tag is only local until the
-    -- version is published. A candidate on Hackage cannot be taken back, so
-    -- once one is up it is republished instead.
-    canGoBack = (`elem` [StageTagged, StageCandidate])
-    askBump = put bumpFor (Just (pkgName p))
-    askPublish = put pending (Just (Pending ("Publish " <> pkgId p) [(p, ActPublish)]))
-    primaryStep = \case
-      StageNeedsBump -> Just ("Bump version…", askBump)
-      StageCommitBump -> Just ("Commit version bump", queue ActCommitBump)
-      StageReadyToTag -> Just ("Tag and build", queue ActTagDist)
-      StageTagged -> Just ("Build tarball", queue ActTagDist)
-      StageCandidate -> Just ("Upload candidate", queue ActUpload)
-      StageUploaded -> Just ("Publish…", askPublish)
-      StageReleased -> Nothing
-    secondarySteps = \case
-      StageCandidate -> [("Publish now…", askPublish)]
-      StageUploaded -> [("Republish candidate", republish)]
-      _ -> []
-    -- Move the tag to HEAD, make the tarball again over the old one, and
-    -- upload it as the candidate, as hkgr's upload --force does.
-    republish = uiIO (enqueue env True [(p, ActUpload)])
+    steps = trackSteps frame p next
+    -- Publishing without waiting on a candidate, and replacing a candidate
+    -- that is up: the stop beside the one in hand, both ways.
+    beside = case next of
+      StageCandidate -> atStop steps 3
+      StageUploaded -> atStop steps 2
+      _ -> Nothing
 
 -- | Everything a release can need that is not its next step.
 moreMenu :: Frame -> Package -> PkgStatus -> Stage -> NanoUI ()
@@ -606,16 +645,25 @@ moreMenu Frame {vars = Vars {..}, ..} p s next = do
           , item (psTarball s && pkgHasLibrary p) "Publish docs…" (put pending (Just (Pending ("Publish documentation for " <> pkgId p) [(p, ActPublishDocs)])))
           ]
       menuSeparator
+      -- The whole way back, which no stop on the track offers: the tag and
+      -- the tarball go and nothing takes their place. A candidate on Hackage
+      -- cannot be taken back, and a published version keeps its tag for good.
+      back <- sequence [item canUntag (actionLabel ActUntag) (queue ActUntag)]
+      menuSeparator
       web <-
         sequence
           [ item True "View candidate on Hackage" (uiIO (openUrl (candidateUrl (pkgId p))))
           , item True "View package on Hackage" (uiIO (openUrl (packageUrl (pkgName p))))
           ]
-      pure (listToMaybe [go | Just go <- picks <> web])
+      pure (listToMaybe [go | Just go <- picks <> back <> web])
   forM_ (join chosen) $ \go -> put moreOpen False >> go
   when (respClicked popupResp) (put moreOpen False)
   where
     queue action = uiIO (enqueue env False [(p, action)])
+    canUntag =
+      (isJust (psTagCommit s) || psTarball s)
+        && not (psCandidateUploaded s)
+        && not (isPublished p s)
     item enabled txt go
       | enabled = (\c -> if c then Just go else Nothing) <$> menuItem txt
       | otherwise = Nothing <$ menuItemDisabled txt
@@ -696,9 +744,11 @@ activity frame@Frame {vars = Vars {..}, ..} =
 describe :: Job -> Text
 describe j = jobName j <> " " <> pkgId (jobPackage j)
 
--- | A step's name, as its button said: a forced upload redoes the tag.
+-- | A step's name, as the stop that started it said: forcing replaces the
+-- tag and its tarball, and a forced upload republishes the candidate over it.
 jobName :: Job -> Text
 jobName j
+  | jobAction j == ActTagDist && optForce (jobOptions j) = replaceTagLabel
   | jobAction j == ActUpload && optForce (jobOptions j) = "Republish candidate"
   | otherwise = actionLabel (jobAction j)
 

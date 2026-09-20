@@ -9,7 +9,10 @@ holding one package at its root or many in subdirectories of a monorepo.
 
 Open a git repository and cabalist lists every Cabal package in it. Each
 package's release is a track of four stops, with one button for the next
-step:
+step. The stops are controls too: clicking the one a release stands at takes
+that step, and clicking one it has passed makes that stop's result again,
+which is how a release goes back. Hovering a stop says what clicking it would
+do.
 
 1. **Version.** When the package has changed since its version was released
    (counted from its tag, or from Hackage's upload time when the release was
@@ -25,9 +28,12 @@ step:
    root, a directory git ignores without any change to your `.gitignore`.
 3. **Candidate.** *Upload candidate* uploads the tarball as a Hackage
    candidate, to check before releasing, or skip it with *Publish now…*. To
-   fix something the candidate showed, commit the fix and use *Update
-   candidate*: it moves the tag to the new commit, makes the tarball again
-   over the old one, and uploads it in its place, as often as needed.
+   fix something the candidate showed, commit the fix and click the **Tag**
+   stop: *Replace the tag and tarball* moves the tag to the new commit and
+   makes the tarball again over the old one. Clicking the **Candidate** stop
+   of a candidate that is already up does that and uploads it in the old
+   one's place — *Republish candidate*, as often as needed. A tag is local
+   until the version is published, so both can be repeated freely until then.
 4. **Published.** *Publish…* pushes the branch (when the tag is ahead of it)
    and the tag to your remote, publishes the release, and marks the version
    so cabalist never releases it again. It asks for confirmation first.
@@ -36,8 +42,9 @@ While a candidate is up, or once the version is released, a link under the
 package's name opens it on Hackage.
 
 Everything else a release can need is under *More*: checking the package,
-redoing the tag and tarball after more commits, rebuilding from the tarball,
-and uploading or publishing documentation. Notes under the button point out
+rebuilding from the tarball, uploading or publishing documentation, and
+*Remove tag and tarball*, which goes back past the tag and leaves nothing in
+its place. Notes under the button point out
 what would spoil a release: uncommitted changes, commits after the tag, a
 changelog with no entry for the version, a dependency in the same repository
 that Hackage does not have yet.

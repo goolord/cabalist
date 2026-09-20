@@ -97,6 +97,8 @@ data Headless = Headless
   { hFrame :: Input -> IO ()
   , hBase :: Input
   , hSave :: FilePath -> IO ()
+  , hSaveWith :: Input -> FilePath -> IO ()
+  -- ^ 'hSave' for a state the pointer is part of, such as a hovered stop.
   , hSpans :: IO [(Rect, Text, Color, Color, Rect)]
   }
 
@@ -106,16 +108,16 @@ headless opts env cache k = do
   withSdl opts {sdlWindowHidden = True, sdlWindowResizable = False} ctx0 $ \ctx sdlEnv -> do
     let base = emptyInput {inputWindowSize = sdlWindowSize opts, inputMousePos = V2 (-1) (-1)}
         frame forceFull i = void (sdlDrawFrame ctx (appView env cache) sdlEnv i forceFull)
-        save path = do
-          replicateM_ 2 (frame False base)
-          frame True base
+        save inp path = do
+          replicateM_ 2 (frame False inp)
+          frame True inp
           saved <- saveScreenshot sdlEnv path
           unless saved $ fail ("could not save " <> path)
         spans = do
           a <- collectTextSpans ctx
           b <- collectOverlayTextSpans ctx base
           pure (a <> b)
-    k Headless {hFrame = frame False, hBase = base, hSave = save, hSpans = spans}
+    k Headless {hFrame = frame False, hBase = base, hSave = save base, hSaveWith = save, hSpans = spans}
 
 -- | Render the window for a repository and save it.
 screenshot :: SdlOptions -> FilePath -> FilePath -> IO ()
@@ -237,8 +239,8 @@ selfTestSteps opts dir = do
     shot "03b-log-scrolled"
     click "Hide log"
 
-    step "more menu, then the bump dialog"
-    expect "Back"
+    step "the track's stops, then the bump dialog"
+    mapM_ expect ["Version", "Tag", "Candidate", "Published"]
     click "More"
     shot "04-more"
     click "Bump version…"
@@ -289,15 +291,22 @@ selfTestSteps opts dir = do
     -- report; 09-candidate-up.bmp shows it.)
     expect "The tarball is built"
 
-    step "back to before the tag"
-    click "Back"
+    step "a stop back on the track says what it does, and does it"
+    tagStop <- requireSpan "no Tag stop" . findExact "Tag" =<< hSpans h
+    -- The tooltip only shows while the pointer is on the stop, and settling
+    -- puts it back outside the window.
+    replicateM_ 3 (frame base {inputMousePos = tagStop})
+    tip <- hSpans h
+    unless (hasText "Replace the tag and tarball" tip) $
+      dumpVisible >> fail "the Tag stop did not say what clicking it does"
+    hSaveWith h base {inputMousePos = tagStop} (dir </> "09b-stop-hovered.bmp")
+    click "Tag"
     st4 <- waitForJobs
     case reverse (toList (stJobs st4)) of
-      (j : _) | jobStatus j == JobSucceeded, jobAction j == ActUntag -> pure ()
-      js -> dumpVisible >> fail ("going back did not succeed: " <> show [(jobAction j, jobStatus j) | j <- js])
-    expect "This version has not been released"
-    expect "Tag and build"
-    expectGone "Back"
+      (j : _) | jobStatus j == JobSucceeded, jobAction j == ActTagDist, optForce (jobOptions j) -> pure ()
+      js -> dumpVisible >> fail ("replacing the tag did not succeed: " <> show [(jobAction j, jobStatus j) | j <- js])
+    expect "Replace the tag and tarball cabalist-demo-app-0.1.0.0"
+    expect "The tarball is built"
 
     step "several packages: dependencies first, candidates uploaded (dry run)"
     click "Select"
