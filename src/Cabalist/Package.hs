@@ -55,6 +55,7 @@ data Package = Package
   , pkgDeps :: ![Text]
   -- ^ Every package the library, sublibraries and executables depend on.
   , pkgHasLibrary :: !Bool
+  -- ^ A main library, the one Hackage documents. Sublibraries don't count.
   , pkgNameMismatch :: !Bool
   -- ^ The .cabal file is not named after the package, which cabal sdist
   -- and Hackage reject.
@@ -111,7 +112,7 @@ readPackage root rel = do
             , pkgCabalFile = rel
             , pkgSynopsis = T.strip (T.pack (fromShortText (synopsis pd)))
             , pkgDeps = filter (/= name) deps
-            , pkgHasLibrary = isJust (condLibrary gpd) || not (null (condSubLibraries gpd))
+            , pkgHasLibrary = isJust (condLibrary gpd)
             , pkgNameMismatch = T.pack (takeBaseName rel) /= name
             }
 

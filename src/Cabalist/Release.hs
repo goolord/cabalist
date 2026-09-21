@@ -475,7 +475,10 @@ uploadDocs :: Ctx -> Package -> Bool -> IO ()
 uploadDocs ctx p isPublish = do
   unless (pkgHasLibrary p) $ failStep (pkgName p <> " has no library to document")
   withUnpacked ctx p $ \dir -> do
-    out <- cabalUnpacked ctx dir ["haddock", "--haddock-for-hackage", "--enable-documentation"]
+    -- Only the main library: Hackage hosts its docs alone, and haddocking
+    -- sublibraries for Hackage fails outright (their docs directory is
+    -- never created).
+    out <- cabalUnpacked ctx dir ["haddock", "--haddock-for-hackage", "--enable-documentation", T.unpack ("lib:" <> pkgName p)]
     docs <- findDocsTarball dir out
     case docs of
       Nothing -> failStep "cabal haddock did not report a documentation tarball"
