@@ -62,7 +62,7 @@ unitTests failures = do
     parsePreferred "{\"normal-version\":[\"0.2\",\"0.1.1\"],\"deprecated-version\":[\"0.1\"]}"
       == HackageVersions [ver "0.2", ver "0.1.1"] [ver "0.1"]
   t "latest includes deprecated" (latestVersion (HackageVersions [ver "0.2"] [ver "0.3"]) == Just (ver "0.3"))
-  let p = Package "foo-bar" (ver "1.2") "pkgs/foo-bar" "pkgs/foo-bar/foo-bar.cabal" "" [] True False
+  let p = Package "foo-bar" (ver "1.2") "pkgs/foo-bar" "pkgs/foo-bar/foo-bar.cabal" "" [] True [] False
   t "render tag" (renderTag "{name}-v{version}" p == "foo-bar-v1.2")
   t "parse tag" (parseTagVersion "{name}-v{version}" p "foo-bar-v0.9.1" == Just (ver "0.9.1"))
   t "parse tag of another package" (parseTagVersion "{name}-v{version}" p "foo-v0.9.1" == Nothing)

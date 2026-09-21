@@ -8,6 +8,7 @@ module Cabalist.Package
   ( Package (..)
   , pkgId
   , pkgIsRoot
+  , pkgHasDocs
   , discoverPackages
   , readPackage
   , releaseOrder
@@ -32,13 +33,17 @@ import Distribution.Package qualified as C
 import Distribution.PackageDescription
   ( GenericPackageDescription (..)
   , PackageDescription (..)
+  , LibraryVisibility (..)
   , buildInfo
   , libBuildInfo
+  , libVisibility
+  , unUnqualComponentName
   , targetBuildDepends
   )
 import Distribution.PackageDescription.Parsec (parseGenericPackageDescriptionMaybe)
 import Distribution.Parsec (simpleParsec)
 import Distribution.Pretty (prettyShow)
+import Distribution.Types.CondTree (condTreeData)
 import Distribution.Types.Version (Version)
 import Distribution.Utils.ShortText (fromShortText)
 import Cabalist.Git (trackedFiles)
@@ -55,7 +60,10 @@ data Package = Package
   , pkgDeps :: ![Text]
   -- ^ Every package the library, sublibraries and executables depend on.
   , pkgHasLibrary :: !Bool
-  -- ^ A main library, the one Hackage documents. Sublibraries don't count.
+  -- ^ A main library.
+  , pkgPublicSubLibs :: ![Text]
+  -- ^ The public sublibraries, whose documentation Hackage shows alongside
+  -- the main library's.
   , pkgNameMismatch :: !Bool
   -- ^ The .cabal file is not named after the package, which cabal sdist
   -- and Hackage reject.
@@ -68,6 +76,10 @@ pkgId p = pkgName p <> "-" <> showVersion (pkgVersion p)
 
 pkgIsRoot :: Package -> Bool
 pkgIsRoot p = normalise (pkgDir p) == "."
+
+-- | Whether the package has a library Hackage can document.
+pkgHasDocs :: Package -> Bool
+pkgHasDocs p = pkgHasLibrary p || not (null (pkgPublicSubLibs p))
 
 showVersion :: Version -> Text
 showVersion = T.pack . prettyShow
@@ -113,6 +125,11 @@ readPackage root rel = do
             , pkgSynopsis = T.strip (T.pack (fromShortText (synopsis pd)))
             , pkgDeps = filter (/= name) deps
             , pkgHasLibrary = isJust (condLibrary gpd)
+            , pkgPublicSubLibs =
+                [ T.pack (unUnqualComponentName n)
+                | (n, t) <- condSubLibraries gpd
+                , libVisibility (condTreeData t) == LibraryVisibilityPublic
+                ]
             , pkgNameMismatch = T.pack (takeBaseName rel) /= name
             }
 

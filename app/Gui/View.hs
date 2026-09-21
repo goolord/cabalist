@@ -641,8 +641,8 @@ moreMenu Frame {vars = Vars {..}, ..} p s next = do
           [ item True "Check package" (queue ActCheck)
           , item (next /= StageNeedsBump) "Bump version…" (put bumpFor (Just (pkgName p)))
           , item (psTarball s) "Rebuild from tarball" (queue ActBuild)
-          , item (psTarball s && pkgHasLibrary p) "Upload candidate docs" (queue ActUploadDocs)
-          , item (psTarball s && pkgHasLibrary p) "Publish docs…" (put pending (Just (Pending ("Publish documentation for " <> pkgId p) [(p, ActPublishDocs)])))
+          , item (psTarball s && pkgHasDocs p) "Upload candidate docs" (queue ActUploadDocs)
+          , item (psTarball s && pkgHasDocs p) "Publish docs…" (put pending (Just (Pending ("Publish documentation for " <> pkgId p) [(p, ActPublishDocs)])))
           ]
       menuSeparator
       -- The whole way back, which no stop on the track offers: the tag and

@@ -60,7 +60,7 @@ import System.Directory
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO (hClose, openTempFile)
-import System.FilePath (getSearchPath, isAbsolute, (<.>), (</>))
+import System.FilePath (getSearchPath, isAbsolute, takeDirectory, (<.>), (</>))
 
 -- | How to log in to Hackage for an upload.
 data Credentials
@@ -473,23 +473,71 @@ publish ctx p = do
 -- candidate's documentation or the release's.
 uploadDocs :: Ctx -> Package -> Bool -> IO ()
 uploadDocs ctx p isPublish = do
-  unless (pkgHasLibrary p) $ failStep (pkgName p <> " has no library to document")
+  unless (pkgHasDocs p) $ failStep (pkgName p <> " has no library to document")
   withUnpacked ctx p $ \dir -> do
-    -- Only the main library: Hackage hosts its docs alone, and haddocking
-    -- sublibraries for Hackage fails outright (their docs directory is
-    -- never created).
-    out <- cabalUnpacked ctx dir ["haddock", "--haddock-for-hackage", "--enable-documentation", T.unpack ("lib:" <> pkgName p)]
-    docs <- findDocsTarball dir out
-    case docs of
-      Nothing -> failStep "cabal haddock did not report a documentation tarball"
-      Just file -> do
-        say ctx ("documentation: " <> T.pack file)
-        cabalUpload ctx isPublish True file
+    -- Haddock's paths for a sublibrary run deep (the build directory, then
+    -- <pkgid>/l/<sublib>/doc/html/<pkgid>-docs/<sublib>/), and in the
+    -- temporary directory they pass Windows' 260 character limit, where
+    -- haddock stops with "CreateFile ...: does not exist". So build, and
+    -- merge, in short directories beside the unpacked package.
+    let tmp = takeDirectory dir
+        docsName = T.unpack (pkgId p) <> "-docs"
+        builddir = tmp </> "b"
+        stage = tmp </> "d"
+        merged = stage </> docsName
+        extract = tmp </> "x"
+    createDirectoryIfMissing True merged
+    -- Hackage takes one tarball for all the libraries, and links every
+    -- public library's modules to <pkgid>-docs/<Module>.html. cabal makes a
+    -- tarball per library, all under the same name, with a sublibrary's
+    -- pages in a subdirectory named after it. So haddock each library on its
+    -- own and merge them: the main library at the root, and each sublibrary
+    -- both in its subdirectory and at the root, where the module links
+    -- point. The main library's files win a clash.
+    forM_ (docTargets p) $ \sub -> do
+      out <- cabalUnpacked ctx dir ["haddock", "--builddir=" <> builddir, "--haddock-for-hackage", "--enable-documentation", T.unpack ("lib:" <> maybe (pkgName p) id sub)]
+      tarball <- maybe (failStep "cabal haddock did not report a documentation tarball") pure =<< findDocsTarball dir builddir out
+      removePathForcibly extract
+      createDirectory extract
+      copyFile tarball (extract </> "docs.tar.gz")
+      () <$ run ctx extract "tar" ["-xzf", "docs.tar.gz"]
+      let built = extract </> docsName
+      case sub of
+        Nothing -> mergeTree built merged
+        Just s -> do
+          let sRoot = built </> T.unpack s
+          nested <- doesDirectoryExist sRoot
+          let pages = if nested then sRoot else built
+          mergeTree built merged
+          mergeTree pages (merged </> T.unpack s)
+          mergeTree pages merged
+    removePathForcibly extract
+    -- ustar, which Hackage's portability check accepts from any tar.
+    () <$ run ctx stage "tar" ["--format=ustar", "-czf", docsName <.> "tar.gz", docsName]
+    let file = stage </> docsName <.> "tar.gz"
+    say ctx ("documentation: " <> T.pack file)
+    cabalUpload ctx isPublish True file
   say ctx ((if isPublish then "documentation published: " else "candidate documentation: ") <> (if isPublish then packageUrl (pkgId p) else candidateUrl (pkgId p)))
   where
-    findDocsTarball dir out = do
+    docTargets q = [Nothing | pkgHasLibrary q] <> map Just (pkgPublicSubLibs q)
+    -- Copy a tree into another, keeping files already there. Haddock names a
+    -- sublibrary's Hoogle file <pkg>:<sublib>.txt; a colon is no good in a
+    -- tarball Hackage accepts, and on Windows it leaves an empty file named
+    -- after the package, so both are left out.
+    mergeTree from to = do
+      createDirectoryIfMissing True to
+      entries <- listDirectory from
+      forM_ entries $ \e -> do
+        let src = from </> e
+            dst = to </> e
+        isDir <- doesDirectoryExist src
+        clash <- doesPathExist dst
+        if isDir
+          then mergeTree src dst
+          else unless (clash || ':' `elem` e || T.pack e == pkgName p) (copyFile src dst)
+    findDocsTarball dir builddir out = do
       let named = [T.unpack (T.strip w) | l <- out, w <- T.words l, "-docs.tar.gz" `T.isSuffixOf` w]
-          fallback = dir </> "dist-newstyle" </> T.unpack (pkgId p <> "-docs.tar.gz")
+          fallback = builddir </> T.unpack (pkgId p <> "-docs.tar.gz")
       existing <- filterExisting (map (absolute dir) named <> [fallback])
       pure (case existing of (f : _) -> Just f; [] -> Nothing)
     absolute dir f = if isAbsolute f then f else dir </> f
