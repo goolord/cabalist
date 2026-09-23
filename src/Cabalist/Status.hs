@@ -14,7 +14,7 @@ module Cabalist.Status
 where
 
 import Data.List (sortOn)
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (catMaybes, isJust, listToMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -80,9 +80,7 @@ packageStatus root cfg hackage releasedAt p = do
           , Just v <- [parseTagVersion fmt p t]
           , v /= pkgVersion p
           ]
-      prev = case released of
-        (r : _) -> Just r
-        [] -> Nothing
+      prev = listToMaybe released
   changes <- case prev of
     Just (_, t) -> commitsTouching root (T.unpack t <> "..HEAD") dir
     Nothing -> commitsTouching root "HEAD" dir
@@ -144,15 +142,14 @@ data Stage
 stage :: Package -> PkgStatus -> Stage
 stage p s
   | psVersionUncommitted s = StageCommitBump
-  | isPublished p s = if psChangesSincePrevRelease > 0 then StageNeedsBump else StageReleased
+  -- Once this version is out, "since the previous release" means since this
+  -- version's own tag.
+  | isPublished p s = if null (psUntagged s) then StageReleased else StageNeedsBump
   | olderThanHackage = StageNeedsBump
   | psTarball s = if psCandidateUploaded s then StageUploaded else StageCandidate
   | isJust (psTagCommit s) = StageTagged
   | otherwise = StageReadyToTag
   where
-    -- Once this version is out, "since the previous release" means since
-    -- this version's own tag.
-    psChangesSincePrevRelease = length (psUntagged s)
     olderThanHackage = maybe False (> pkgVersion p) (latestVersion (psHackage s))
 
 -- | A few words for a package list.

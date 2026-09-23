@@ -91,11 +91,11 @@ parseVersion = simpleParsec . T.unpack . T.strip
 -- files that could not be read.
 discoverPackages :: FilePath -> IO ([Package], [(FilePath, Text)])
 discoverPackages root = do
-  files <- filter ((== ".cabal") . takeExtension) <$> trackedFiles root
+  files <- filter ((== ".cabal") . takeExtension) <$> trackedFiles root "*.cabal"
   results <- mapM (\f -> (f,) <$> readPackage root (normalise f)) files
   let ok = [p | (_, Right p) <- results]
       bad = [(f, e) | (f, Left e) <- results]
-  pure (sortOn (\p -> (pkgDir p /= ".", pkgDir p, pkgName p)) ok, bad)
+  pure (sortOn (\p -> (not (pkgIsRoot p), pkgDir p, pkgName p)) ok, bad)
 
 -- | Read one .cabal file, given relative to the root.
 readPackage :: FilePath -> FilePath -> IO (Either Text Package)
@@ -118,9 +118,7 @@ readPackage root rel = do
        in Package
             { pkgName = name
             , pkgVersion = C.pkgVersion ident
-            , pkgDir = case takeDirectory rel of
-                "" -> "."
-                d -> normalise d
+            , pkgDir = normalise (takeDirectory rel)
             , pkgCabalFile = rel
             , pkgSynopsis = T.strip (T.pack (fromShortText (synopsis pd)))
             , pkgDeps = filter (/= name) deps
@@ -133,11 +131,12 @@ readPackage root rel = do
             , pkgNameMismatch = T.pack (takeBaseName rel) /= name
             }
 
--- | The packages of this repository that a package depends on.
+-- | The packages of this repository that a package depends on. Applied to
+-- the packages alone, it indexes them once for every package asked about.
 internalDeps :: [Package] -> Package -> [Package]
-internalDeps pkgs p =
-  let byName = Map.fromList [(pkgName q, q) | q <- pkgs]
-   in mapMaybe (`Map.lookup` byName) (pkgDeps p)
+internalDeps pkgs = \p -> mapMaybe (`Map.lookup` byName) (pkgDeps p)
+  where
+    byName = Map.fromList [(pkgName q, q) | q <- pkgs]
 
 -- | The packages in an order where each comes after the packages of the
 -- repository it depends on, so a batch release uploads dependencies first.
@@ -147,7 +146,8 @@ releaseOrder :: [Package] -> [Package] -> [Package]
 releaseOrder allPkgs chosen = go Set.empty chosen []
   where
     chosenNames = Set.fromList (map pkgName chosen)
-    depsOf p = [d | d <- map pkgName (internalDeps allPkgs p), d `Set.member` chosenNames]
+    internal = internalDeps allPkgs
+    depsOf p = [d | d <- map pkgName (internal p), d `Set.member` chosenNames]
     go _ [] acc = reverse acc
     go placed pending acc =
       case break (all (`Set.member` placed) . depsOf) pending of

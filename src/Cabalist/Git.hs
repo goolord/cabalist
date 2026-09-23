@@ -16,12 +16,14 @@ module Cabalist.Git
   , isAncestor
   , trackedFiles
   , gitPathspec
+  , forwardSlashes
   )
 where
 
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Cabalist.File (topLevelKey)
 import Cabalist.Process (readCmd, readCmdOk)
 import System.Exit (ExitCode (..))
 import System.FilePath (normalise)
@@ -49,12 +51,12 @@ listTags root pattern = maybe [] T.lines <$> git root ["tag", "--list", pattern]
 -- | A path for git's pathspec, relative to the root and with forward slashes.
 -- The root itself is @.@.
 gitPathspec :: FilePath -> String
-gitPathspec dir = case map slash (normalise dir) of
+gitPathspec dir = case forwardSlashes (normalise dir) of
   "" -> "."
   p -> p
-  where
-    slash '\\' = '/'
-    slash c = c
+
+forwardSlashes :: FilePath -> String
+forwardSlashes = map (\c -> if c == '\\' then '/' else c)
 
 -- | How many commits in @range@ (@A..B@) change anything under @dir@.
 commitsTouching :: FilePath -> String -> FilePath -> IO Int
@@ -78,10 +80,10 @@ dirtyFiles root dir =
 versionFieldChanged :: FilePath -> FilePath -> IO Bool
 versionFieldChanged root cabalFile = do
   diff <- fromMaybe "" <$> git root ["diff", "-U0", "HEAD", "--", gitPathspec cabalFile]
-  pure $ any (isVersionChange . T.toLower) (T.lines diff)
+  pure $ any isVersionChange (T.lines diff)
   where
     isVersionChange l = case T.uncons l of
-      Just ('+', rest) -> "version" `T.isPrefixOf` rest && ":" `T.isPrefixOf` T.stripStart (T.drop 7 rest)
+      Just ('+', rest) -> topLevelKey rest == Just "version"
       _ -> False
 
 -- | Whether some branch contains the tag's commit. A tag that was moved off
@@ -99,12 +101,12 @@ isAncestor root a b = do
   (code, _) <- readCmd root "git" ["merge-base", "--is-ancestor", a, b]
   pure (code == ExitSuccess)
 
--- | Tracked and untracked (but not ignored) files, relative to the root, with
--- forward slashes.
-trackedFiles :: FilePath -> IO [FilePath]
-trackedFiles root =
+-- | Tracked and untracked (but not ignored) files matching a pathspec, in
+-- which @*@ matches slashes too, relative to the root, with forward slashes.
+trackedFiles :: FilePath -> String -> IO [FilePath]
+trackedFiles root pathspec =
   maybe [] (map T.unpack . T.lines)
-    <$> git root ["ls-files", "--cached", "--others", "--exclude-standard"]
+    <$> git root ["ls-files", "--cached", "--others", "--exclude-standard", "--", pathspec]
 
 -- | One line per commit since a time (ISO 8601) that touches @dir@, newest
 -- first: what changed since a release that was never tagged.

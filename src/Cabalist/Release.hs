@@ -37,15 +37,15 @@ where
 import Control.Exception (SomeException, finally, onException, try)
 import Control.Monad (filterM, forM_, unless, void, when)
 import Data.ByteString qualified as B
-import Data.Char (isSpace)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List (find, maximumBy)
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe)
 import Data.Ord (comparing)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
-import Cabalist.File (editUtf8, readUtf8, writeUtf8)
+import Cabalist.File (editUtf8, readUtf8, topLevelKey, writeUtf8)
 import Data.Time (defaultTimeLocale, formatTime, getCurrentTime)
 import GHC.Clock (getMonotonicTimeNSec)
 import Cabalist.Config
@@ -60,7 +60,7 @@ import System.Directory
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO (hClose, openTempFile)
-import System.FilePath (getSearchPath, isAbsolute, takeDirectory, (<.>), (</>))
+import System.FilePath (getSearchPath, takeDirectory, (<.>), (</>))
 
 -- | How to log in to Hackage for an upload.
 data Credentials
@@ -121,8 +121,15 @@ say ctx = logLine (ctxLog ctx)
 run :: Ctx -> FilePath -> FilePath -> [String] -> IO [Text]
 run ctx = runLogged_ (ctxLog ctx)
 
+run_ :: Ctx -> FilePath -> FilePath -> [String] -> IO ()
+run_ ctx dir prog = void . run ctx dir prog
+
 git_ :: Ctx -> [String] -> IO ()
-git_ ctx args = () <$ run ctx (ctxRoot ctx) "git" args
+git_ ctx = run_ ctx (ctxRoot ctx) "git"
+
+-- | Run a cleanup that is allowed to fail.
+ignoringErrors :: forall a. IO a -> IO ()
+ignoringErrors act = void (try act :: IO (Either SomeException a))
 
 tagOf :: Ctx -> Package -> Text
 tagOf ctx = renderTag (cfgTagFormat (ctxConfig ctx))
@@ -150,7 +157,7 @@ checkPackage ctx p showDiff = do
 
 -- | @cabal check@ in the package's directory of the working tree.
 cabalCheck :: Ctx -> Package -> IO ()
-cabalCheck ctx p = () <$ run ctx (ctxRoot ctx </> pkgDir p) (ctxCabal ctx) ["check"]
+cabalCheck ctx p = run_ ctx (ctxRoot ctx </> pkgDir p) (ctxCabal ctx) ["check"]
 
 -- | Tag the version (unless it is tagged and not forced) and make the tarball
 -- from the tag. If making the tarball fails, the tag goes back to where it
@@ -191,7 +198,7 @@ tagDist ctx p = do
               Just old -> git_ undo ["tag", "--force", T.unpack tag, T.unpack old]
               Nothing -> git_ undo ["tag", "--delete", T.unpack tag]
             -- A tarball without its tag would read as ready to upload.
-            void (try (removeFile (tarballPath root p)) :: IO (Either SomeException ()))
+            ignoringErrors (removeFile (tarballPath root p))
 
 assertTagOnBranch :: Ctx -> Text -> IO ()
 assertTagOnBranch ctx tag = do
@@ -225,7 +232,7 @@ withTempDir label k = do
   let dir = tmp </> ("cabalist-" <> T.unpack label <> "-" <> show stamp)
   createDirectoryIfMissing True dir
   -- git marks its object files read-only; removePathForcibly copes with that.
-  k dir `finally` (try (removePathForcibly dir) :: IO (Either SomeException ()))
+  k dir `finally` ignoringErrors (removePathForcibly dir)
 
 -- | Stop cabal from finding a project file above a package's directory.
 ensureProject :: Ctx -> FilePath -> [FilePath] -> IO ()
@@ -236,8 +243,6 @@ ensureProject ctx dir extra = do
     let lines' = ("packages: ." : ["          " <> forwardSlashes d | d <- extra])
     writeUtf8 file (T.unlines (map T.pack lines'))
     say ctx ("wrote " <> T.pack file <> (if null extra then "" else " (with the repository's copies of its dependencies)"))
-  where
-    forwardSlashes = map (\c -> if c == '\\' then '/' else c)
 
 -- | Clone the repository at the package's tag and run @cabal sdist@ in the
 -- package's directory, writing the tarball to the work directory. Then build
@@ -256,26 +261,26 @@ sdist ctx p replace = do
       then removeFile target
       else failStep (T.pack target <> " exists already")
   -- A new tarball has not been uploaded, whatever the old one was.
-  void (try (removeFile (candidateMarker root p)) :: IO (Either SomeException ()))
+  ignoringErrors (removeFile (candidateMarker root p))
   withTempDir "sdist" $ \tmp -> do
     let clone = tmp </> "repo"
     git_ ctx ["clone", "-q", "--no-checkout", root, clone]
-    () <$ run ctx clone "git" ["-c", "advice.detachedHead=false", "checkout", "-q", "refs/tags/" <> T.unpack tag]
+    run_ ctx clone "git" ["-c", "advice.detachedHead=false", "checkout", "-q", "refs/tags/" <> T.unpack tag]
     hasModules <- doesFileExist (clone </> ".gitmodules")
-    when hasModules $ () <$ run ctx clone "git" ["submodule", "update", "--init", "--recursive"]
+    when hasModules $ run_ ctx clone "git" ["submodule", "update", "--init", "--recursive"]
     let pkgTmp = clone </> pkgDir p
-    () <$ run ctx pkgTmp (ctxCabal ctx) ["check"]
+    run_ ctx pkgTmp (ctxCabal ctx) ["check"]
     when (optHlint opts) $ do
       hasHlint <- haveProgram "hlint"
       if hasHlint
         then do
           say ctx "# hlint (advice only)"
           -- hlint exits non-zero when it has suggestions; they are advice.
-          (code, _) <- runLogged (ctxLog ctx) {logLine = \l -> unless ("cabalist: hlint exited" `T.isPrefixOf` l) (say ctx l)} pkgTmp "hlint" ["--no-summary", "."] Nothing
+          (code, _) <- runLogged (ctxLog ctx) pkgTmp "hlint" ["--no-summary", "."] Nothing
           when (code /= ExitSuccess) $ say ctx "# hlint has suggestions (advice only; the release continues)"
         else say ctx "# hlint is not installed; skipping it"
     ensureProject ctx pkgTmp []
-    () <$ run ctx pkgTmp (ctxCabal ctx) ["sdist", "--output-directory=" <> workDir root, "."]
+    run_ ctx pkgTmp (ctxCabal ctx) ["sdist", "--output-directory=" <> workDir root, "."]
   made <- doesFileExist target
   unless made $ failStep ("cabal sdist did not write " <> T.pack target)
   say ctx ("wrote " <> T.pack target)
@@ -291,7 +296,7 @@ pristineBuild ctx p = do
   unless exists $ failStep ("no tarball yet: tag and sdist first (" <> T.pack tarball <> ")")
   withUnpacked ctx p $ \dir -> do
     say ctx ("# building " <> pkgId p <> " from its tarball")
-    () <$ cabalUnpacked ctx dir ["build"]
+    void (cabalUnpacked ctx dir ["build"])
 
 -- | Run cabal in an unpacked tarball. There a dependency comes from Hackage
 -- rather than the repository, so a package published since the last
@@ -304,9 +309,9 @@ cabalUnpacked ctx dir args = do
     ExitFailure _
       | any ("unknown package: " `T.isInfixOf`) out -> do
           say ctx "# cabal's package index is missing a package; updating it and trying again"
-          () <$ run ctx dir (ctxCabal ctx) ["update"]
+          run_ ctx dir (ctxCabal ctx) ["update"]
           run ctx dir (ctxCabal ctx) args
-      | otherwise -> failStep ("cabal " <> T.pack (unwords (take 1 args)) <> " failed")
+      | otherwise -> out <$ exitOk (ctxLog ctx) (ctxCabal ctx) args code
 
 -- | Unpack the tarball in a temporary directory and run an action in the
 -- package directory inside it, which has a project file of its own.
@@ -317,7 +322,7 @@ withUnpacked ctx p k = do
     -- tar is given a relative name, so neither bsdtar (Windows) nor GNU tar
     -- (which reads "C:" as a remote host) trips over a drive letter.
     copyFile (tarballPath root p) (tmp </> "package.tar.gz")
-    () <$ run ctx tmp "tar" ["-xzf", "package.tar.gz"]
+    run_ ctx tmp "tar" ["-xzf", "package.tar.gz"]
     let dir = tmp </> T.unpack (pkgId p)
     -- The repository's own copies of dependencies: all of them when asked,
     -- and otherwise those Hackage does not have yet, which could not be
@@ -327,20 +332,18 @@ withUnpacked ctx p k = do
         local = if optSiblings (ctxOptions ctx) then deps else unpublished
     unless (optSiblings (ctxOptions ctx) || null unpublished) $
       say ctx ("note: building against the repository's " <> T.intercalate ", " (map pkgName unpublished) <> ", not on Hackage yet; release " <> (if length unpublished == 1 then "it" else "them") <> " first")
-    let siblings = [absolute root (pkgDir q) | q <- local]
-    ensureProject ctx dir siblings
+    ensureProject ctx dir [root </> pkgDir q | q <- local]
     k dir
-  where
-    absolute root d = if isAbsolute d then d else root </> d
 
 -- | Packages of the repository a package depends on, directly or not.
 transitiveDeps :: [Package] -> Package -> [Package]
-transitiveDeps pkgs p0 = go [] (internalDeps pkgs p0)
+transitiveDeps pkgs p0 = go (Set.singleton (pkgName p0)) [] (internal p0)
   where
-    go seen [] = reverse seen
-    go seen (q : qs)
-      | pkgName q `elem` map pkgName seen || pkgName q == pkgName p0 = go seen qs
-      | otherwise = go (q : seen) (qs <> internalDeps pkgs q)
+    internal = internalDeps pkgs
+    go _ found [] = reverse found
+    go seen found (q : qs)
+      | pkgName q `Set.member` seen = go seen found qs
+      | otherwise = go (Set.insert (pkgName q) seen) (q : found) (qs <> internal q)
 
 -- | The arguments for @cabal upload@, and what to feed its prompts. A token
 -- is not among them: 'cabalUpload' hands it to cabal in a config file
@@ -362,10 +365,7 @@ tokenConfig :: Maybe Text -> Text -> Text
 tokenConfig userConfig tok =
   T.unlines (("token: " <> tok) : maybe defaultRepo (filter (not . loginField) . T.lines) userConfig)
   where
-    -- Only top-level fields: sections indent theirs.
-    loginField l =
-      let (k, v) = T.breakOn ":" l
-       in not (T.null v) && not (T.null k) && not (isSpace (T.head k)) && T.toLower (T.strip k) `elem` ["token", "username", "password", "password-command"]
+    loginField l = maybe False (`elem` ["token", "username", "password", "password-command"]) (topLevelKey l)
     defaultRepo = ["repository hackage.haskell.org", "  url: http://hackage.haskell.org/"]
 
 -- | Where cabal reads its config: @cabal path --config-file@ asks cabal,
@@ -394,7 +394,7 @@ withTokenConfig ctx tok k = do
   -- temporary directory is the user's own.
   (path, h) <- openTempFile tmp "cabalist-upload.config"
   (B.hPut h (encodeUtf8 (tokenConfig userConfig tok)) `finally` hClose h >> k path)
-    `finally` void (try (removeFile path) :: IO (Either SomeException ()))
+    `finally` ignoringErrors (removeFile path)
 
 -- | Run @cabal upload@, treating an error in its output as failure too:
 -- older cabals exit successfully when Hackage rejects an upload.
@@ -405,15 +405,14 @@ cabalUpload ctx isPublish docs file = do
   if optDryRun (ctxOptions ctx)
     then say ctx ("dry run: would run " <> renderCommand "cabal" args <> case creds of ApiToken _ -> ", with the token in a temporary config file"; _ -> "")
     else do
+      let cabal extra = runLogged (ctxLog ctx) (ctxRoot ctx) (ctxCabal ctx) (extra <> args) input
       (code, out) <- case creds of
-        ApiToken tok -> withTokenConfig ctx tok $ \cfg ->
-          runLogged (ctxLog ctx) (ctxRoot ctx) (ctxCabal ctx) (("--config-file=" <> cfg) : args) input
-        _ -> runLogged (ctxLog ctx) (ctxRoot ctx) (ctxCabal ctx) args input
+        ApiToken tok -> withTokenConfig ctx tok $ \cfg -> cabal ["--config-file=" <> cfg]
+        _ -> cabal []
       let rejected = find (\l -> any (`T.isInfixOf` T.toLower l) ["error uploading", "error:", "401 unauthorized", "403 forbidden"]) out
-      case (code, rejected) of
-        (ExitSuccess, Nothing) -> pure ()
-        (_, Just l) -> failStep ("upload failed: " <> T.strip l)
-        (ExitFailure _, Nothing) -> failStep "cabal upload failed"
+      case rejected of
+        Just l -> failStep ("upload failed: " <> T.strip l)
+        Nothing -> exitOk (ctxLog ctx) (ctxCabal ctx) args code
 
 -- | Upload the tarball as a candidate, tagging and making it first if needed.
 upload :: Ctx -> Package -> IO ()
@@ -495,12 +494,12 @@ uploadDocs ctx p isPublish = do
     -- both in its subdirectory and at the root, where the module links
     -- point. The main library's files win a clash.
     forM_ (docTargets p) $ \sub -> do
-      out <- cabalUnpacked ctx dir ["haddock", "--builddir=" <> builddir, "--haddock-for-hackage", "--enable-documentation", T.unpack ("lib:" <> maybe (pkgName p) id sub)]
+      out <- cabalUnpacked ctx dir ["haddock", "--builddir=" <> builddir, "--haddock-for-hackage", "--enable-documentation", T.unpack ("lib:" <> fromMaybe (pkgName p) sub)]
       tarball <- maybe (failStep "cabal haddock did not report a documentation tarball") pure =<< findDocsTarball dir builddir out
       removePathForcibly extract
       createDirectory extract
       copyFile tarball (extract </> "docs.tar.gz")
-      () <$ run ctx extract "tar" ["-xzf", "docs.tar.gz"]
+      run_ ctx extract "tar" ["-xzf", "docs.tar.gz"]
       let built = extract </> docsName
       case sub of
         Nothing -> mergeTree built merged
@@ -513,11 +512,11 @@ uploadDocs ctx p isPublish = do
           mergeTree pages merged
     removePathForcibly extract
     -- ustar, which Hackage's portability check accepts from any tar.
-    () <$ run ctx stage "tar" ["--format=ustar", "-czf", docsName <.> "tar.gz", docsName]
+    run_ ctx stage "tar" ["--format=ustar", "-czf", docsName <.> "tar.gz", docsName]
     let file = stage </> docsName <.> "tar.gz"
     say ctx ("documentation: " <> T.pack file)
     cabalUpload ctx isPublish True file
-  say ctx ((if isPublish then "documentation published: " else "candidate documentation: ") <> (if isPublish then packageUrl (pkgId p) else candidateUrl (pkgId p)))
+  say ctx (if isPublish then "documentation published: " <> packageUrl (pkgId p) else "candidate documentation: " <> candidateUrl (pkgId p))
   where
     docTargets q = [Nothing | pkgHasLibrary q] <> map Just (pkgPublicSubLibs q)
     -- Copy a tree into another, keeping files already there. Haddock names a
@@ -538,10 +537,7 @@ uploadDocs ctx p isPublish = do
     findDocsTarball dir builddir out = do
       let named = [T.unpack (T.strip w) | l <- out, w <- T.words l, "-docs.tar.gz" `T.isSuffixOf` w]
           fallback = builddir </> T.unpack (pkgId p <> "-docs.tar.gz")
-      existing <- filterExisting (map (absolute dir) named <> [fallback])
-      pure (case existing of (f : _) -> Just f; [] -> Nothing)
-    absolute dir f = if isAbsolute f then f else dir </> f
-    filterExisting fs = concat <$> mapM (\f -> (\e -> [f | e]) <$> doesFileExist f) fs
+      listToMaybe <$> filterM doesFileExist (map (dir </>) named <> [fallback])
 
 -- | Set a new version in the .cabal file and add a changelog entry for it.
 bumpPackage :: Ctx -> Package -> Bump -> IO Version

@@ -11,7 +11,9 @@ module Cabalist.Process
     -- * Running commands
   , runLogged
   , runLogged_
+  , exitOk
   , readCmd
+  , readCmdBytes
   , readCmdOk
   , renderCommand
   , haveProgram
@@ -20,9 +22,10 @@ where
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (Exception, IOException, SomeException, evaluate, finally, throwIO, try)
-import Control.Monad (unless, void)
+import Control.Exception (Exception, IOException, SomeException, finally, throwIO, try)
+import Control.Monad (forM_, unless, void, when)
 import Data.Char (toLower)
+import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.ByteString.Char8 qualified as BC
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
@@ -82,11 +85,12 @@ haveProgram prog = isJust <$> findExecutable prog
 -- waiting forever. Returns the exit code and every line it printed.
 --
 -- A program that cannot be started is reported in the log and as exit code
--- 127, like a shell would.
+-- 127, like a shell would. A non-zero exit is not logged here: a caller that
+-- treats it as failure does so with 'exitOk'.
 runLogged :: Logger -> FilePath -> FilePath -> [String] -> Maybe Text -> IO (ExitCode, [Text])
 runLogged lg dir prog args stdinText = do
   cancelled <- logCancelled lg
-  if cancelled then throwIO StepCancelled else pure ()
+  when cancelled (throwIO StepCancelled)
   logLine lg ("$ " <> renderCommand prog args)
   (readEnd, writeEnd) <- createPipe
   hSetBinaryMode readEnd True
@@ -111,17 +115,13 @@ runLogged lg dir prog args stdinText = do
       pure (ExitFailure 127, [])
     Right (mIn, _, _, ph) -> do
       logProcess lg (Just ph)
-      case mIn of
-        Nothing -> pure ()
-        Just h -> void (try (maybe (pure ()) (B.hPut h . encodeUtf8) stdinText >> hClose h) :: IO (Either SomeException ()))
+      forM_ mIn $ \h -> void (try (mapM_ (B.hPut h . encodeUtf8) stdinText >> hClose h) :: IO (Either SomeException ()))
       linesRef <- newIORef []
       readLines readEnd (\l -> atomicModifyIORef' linesRef (\ls -> (l : ls, ())) >> logLine lg l)
         `finally` hClose readEnd
       code <- waitForProcess ph
       logProcess lg Nothing
       out <- reverse <$> readIORef linesRef
-      unless (code == ExitSuccess) $
-        logLine lg ("cabalist: " <> T.pack prog <> " exited with " <> T.pack (show code))
       nowCancelled <- logCancelled lg
       if nowCancelled then throwIO StepCancelled else pure (code, out)
 
@@ -129,9 +129,14 @@ runLogged lg dir prog args stdinText = do
 runLogged_ :: Logger -> FilePath -> FilePath -> [String] -> IO [Text]
 runLogged_ lg dir prog args = do
   (code, out) <- runLogged lg dir prog args Nothing
-  case code of
-    ExitSuccess -> pure out
-    ExitFailure _ -> failStep (T.pack (takeBaseName prog) <> " " <> T.pack (unwords (take 1 args)) <> " failed")
+  out <$ exitOk lg prog args code
+
+-- | Fail the step, with the exit code in the log, unless a command succeeded.
+exitOk :: Logger -> FilePath -> [String] -> ExitCode -> IO ()
+exitOk _ _ _ ExitSuccess = pure ()
+exitOk lg prog args code = do
+  logLine lg ("cabalist: " <> T.pack prog <> " exited with " <> T.pack (show code))
+  failStep (T.pack (takeBaseName prog) <> " " <> T.pack (unwords (take 1 args)) <> " failed")
 
 -- | Split a byte stream into lines, dropping carriage returns, and decode each
 -- as UTF-8 (leniently: build tools print whatever their locale gives them).
@@ -149,30 +154,27 @@ readLines h emit = go
 -- trailing whitespace removed. Standard error is discarded. A program that
 -- cannot be started gives exit code 127.
 readCmd :: FilePath -> FilePath -> [String] -> IO (ExitCode, Text)
-readCmd dir prog args = do
-  let cp =
-        (proc prog args)
-          { cwd = Just dir
-          , std_in = CreatePipe
-          , std_out = CreatePipe
-          , std_err = CreatePipe
-          }
-  r <- try (createProcess cp)
-  case r of
-    Left (_ :: IOException) -> pure (ExitFailure 127, "")
-    Right (mIn, Just hOut, Just hErr, ph) -> do
-      mapM_ hClose mIn
-      -- Drain stderr alongside stdout, so neither pipe fills and blocks.
-      errDone <- newEmptyMVar
-      _ <- forkIO (B.hGetContents hErr >>= evaluate . B.length >> putMVar errDone ())
-      out <- B.hGetContents hOut
-      takeMVar errDone
-      code <- waitForProcess ph
-      t <- evaluate (T.stripEnd (decodeUtf8Lenient (BC.filter (/= '\r') out)))
-      pure (code, t)
-    Right (mIn, _, _, ph) -> do
-      mapM_ hClose mIn
-      (,"") <$> waitForProcess ph
+readCmd dir prog args =
+  readCmdBytes dir prog args B.empty >>= \case
+    Left _ -> pure (ExitFailure 127, "")
+    Right (code, out, _) -> pure (code, T.stripEnd (decodeUtf8Lenient (BC.filter (/= '\r') out)))
+
+-- | Run a command quietly with the given bytes on its standard input, which
+-- is then closed, and return its exit code, standard output and standard
+-- error; or why it could not be started.
+readCmdBytes :: FilePath -> FilePath -> [String] -> ByteString -> IO (Either IOException (ExitCode, ByteString, ByteString))
+readCmdBytes dir prog args input = try $ do
+  (Just hIn, Just hOut, Just hErr, ph) <-
+    createProcess (proc prog args) {cwd = Just dir, std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
+  -- Drain stderr alongside stdout, so neither pipe fills and blocks.
+  errVar <- newEmptyMVar
+  _ <- forkIO (B.hGetContents hErr >>= putMVar errVar)
+  -- A command may exit without reading its input.
+  void (try (B.hPut hIn input >> hClose hIn) :: IO (Either IOException ()))
+  out <- B.hGetContents hOut
+  err <- takeMVar errVar
+  code <- waitForProcess ph
+  pure (code, out, err)
 
 -- | The output of a command that succeeded, or 'Nothing'.
 readCmdOk :: FilePath -> FilePath -> [String] -> IO (Maybe Text)

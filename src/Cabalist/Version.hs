@@ -12,11 +12,12 @@ module Cabalist.Version
 where
 
 import Data.Char (isDigit, isSpace, toLower)
-import Data.List (sortOn)
+import Data.List (isPrefixOf, sortOn)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Distribution.Types.Version (mkVersion, versionNumbers)
+import Cabalist.File (topLevelKey)
 import Cabalist.Package (Version, showVersion)
 import System.Directory (doesFileExist, listDirectory)
 import System.FilePath ((</>))
@@ -55,12 +56,7 @@ setVersionField v src =
        in Right (T.intercalate "\n" (before <> [new] <> after))
   where
     ls = T.splitOn "\n" src
-    isVersionLine l =
-      let (key, rest) = T.breakOn ":" l
-       in not (T.null rest)
-            && not (T.null key)
-            && not (maybe False (isSpace . fst) (T.uncons key))
-            && T.toLower (T.stripEnd key) == "version"
+    isVersionLine l = topLevelKey l == Just "version"
 
 -- | The package's changelog, if it has one.
 findChangelog :: FilePath -> IO (Maybe FilePath)
@@ -73,8 +69,7 @@ findChangelog dir = do
       isFile <- doesFileExist (dir </> n)
       pure (if isFile then Just n else Nothing)
   where
-    isChangelog n = any (`startsWith` n) ["changelog", "changes", "history"]
-    startsWith p n = take (length p) n == p
+    isChangelog n = any (`isPrefixOf` n) ["changelog", "changes", "history"]
 
 -- | Whether a changelog has an entry heading for a version.
 changelogMentions :: Version -> Text -> Bool
@@ -112,11 +107,12 @@ addChangelogEntry v date src
           -- No entries yet: after the title if there is one, else at the top.
           case ls of
             (title : rest) | "#" `T.isPrefixOf` title ->
-              T.intercalate "\n" ([title, "", "## " <> ver <> " -- " <> date, "", "* ", ""] <> dropWhile T.null rest)
-            _ -> T.intercalate "\n" (["## " <> ver <> " -- " <> date, "", "* ", ""] <> ls)
+              T.intercalate "\n" ([title, ""] <> newEntry <> dropWhile T.null rest)
+            _ -> T.intercalate "\n" (newEntry <> ls)
   where
     ls = T.splitOn "\n" src
     ver = showVersion v
+    newEntry = ["## " <> ver <> " -- " <> date, "", "* ", ""]
     isEntryHeading l =
       let s = T.strip l
        in ("#" `T.isPrefixOf` s || "[" `T.isPrefixOf` s || maybe False (isDigit . fst) (T.uncons s))

@@ -20,6 +20,7 @@ import Data.Text qualified as T
 import Cabalist.Package (Version, parseVersion)
 import Cabalist.Process (readCmd)
 import System.Exit (ExitCode (..))
+import Text.Read (readMaybe)
 
 data HackageInfo
   = HackageUnknown
@@ -56,9 +57,9 @@ curl extra url = do
     ExitFailure n -> pure (Left ("curl failed (exit " <> T.pack (show n) <> ")"))
     ExitSuccess ->
       let (body, status) = T.breakOnEnd "\n" out
-       in case reads (T.unpack status) of
-            [(s, "")] -> pure (Right (s, T.dropEnd 1 body))
-            _ -> pure (Left "unexpected response from Hackage")
+       in case readMaybe (T.unpack status) of
+            Just s -> pure (Right (s, T.dropEnd 1 body))
+            Nothing -> pure (Left "unexpected response from Hackage")
 
 fetchHackageInfo :: Text -> IO HackageInfo
 fetchHackageInfo name =

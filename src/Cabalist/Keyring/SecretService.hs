@@ -9,18 +9,14 @@ module Cabalist.Keyring.SecretService
   )
 where
 
-import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (IOException, try)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8Lenient)
+import Cabalist.Process (readCmdBytes)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
-import System.IO (hClose)
-import System.Process
 
 backendName :: Text
 backendName = "the system keyring"
@@ -64,17 +60,6 @@ message = T.strip . decodeUtf8Lenient
 
 -- | Run secret-tool with the given bytes on its standard input.
 secretTool :: FilePath -> [String] -> ByteString -> IO (Either Text (ExitCode, ByteString, ByteString))
-secretTool tool args input = do
-  r <- try $ do
-    (Just hIn, Just hOut, Just hErr, ph) <-
-      createProcess (proc tool args) {std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
-    errVar <- newEmptyMVar
-    _ <- forkIO (B.hGetContents hErr >>= putMVar errVar)
-    B.hPut hIn input >> hClose hIn
-    out <- B.hGetContents hOut
-    err <- takeMVar errVar
-    code <- waitForProcess ph
-    pure (code, out, err)
-  pure $ case r of
-    Left (e :: IOException) -> Left ("could not run secret-tool: " <> T.pack (show e))
-    Right x -> Right x
+secretTool tool args input =
+  either (\e -> Left ("could not run secret-tool: " <> T.pack (show e))) Right
+    <$> readCmdBytes "." tool args input

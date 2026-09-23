@@ -28,6 +28,7 @@ where
 import Control.Exception (IOException, try)
 import Control.Monad (unless)
 import Data.List (sortOn)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -73,19 +74,20 @@ ensureWorkDir root = do
 -- | The saved settings, or a default guessed from the repository's tags.
 loadConfig :: FilePath -> [Package] -> IO Config
 loadConfig root pkgs = do
-  guessed <- guessTagFormat root pkgs
-  let base = defaultConfig {cfgTagFormat = guessed}
   r <- try (readUtf8 (configFile root))
-  pure $ case r of
-    Left (_ :: IOException) -> base
-    Right src -> foldl apply base (T.lines src)
+  let fields = either (\(_ :: IOException) -> []) (mapMaybe field . T.lines) r
+      -- The last valid setting of a field wins.
+      saved k ok = listToMaybe (reverse [v | (k', v) <- fields, k' == k, ok v])
+  tagFormat <- maybe (guessTagFormat root pkgs) pure (saved "tag-format" validTagFormat)
+  pure
+    Config
+      { cfgTagFormat = tagFormat
+      , cfgRemote = fromMaybe (cfgRemote defaultConfig) (saved "remote" (not . T.null))
+      }
   where
-    apply cfg l = case T.breakOn ":" l of
-      (k, v) | not (T.null v) -> case T.strip k of
-        "tag-format" | validTagFormat (T.strip (T.drop 1 v)) -> cfg {cfgTagFormat = T.strip (T.drop 1 v)}
-        "remote" | not (T.null (T.strip (T.drop 1 v))) -> cfg {cfgRemote = T.strip (T.drop 1 v)}
-        _ -> cfg
-      _ -> cfg
+    field l = case T.breakOn ":" l of
+      (k, v) | not (T.null v) -> Just (T.strip k, T.strip (T.drop 1 v))
+      _ -> Nothing
 
 saveConfig :: FilePath -> Config -> IO ()
 saveConfig root cfg = do
